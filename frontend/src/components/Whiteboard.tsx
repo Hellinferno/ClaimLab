@@ -17,12 +17,248 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
 }) => {
   const renderedObjects = useMemo(() => scene.objects || [], [scene]);
 
+  // Helper to render the appropriate numerical chart inside a plot_ref object
+  const renderPlotContent = (obj: BoardObject, width: number, height: number) => {
+    const isSelected = selectedObjectId === obj.id;
+    const recipeId = activeRun?.recipe_id || 'attention_scaling_v1';
+
+    // 1. Softmax Sensitivity (Bar Chart)
+    if (recipeId === 'softmax_sensitivity_v1' && activeRun?.output) {
+      const origProbs = activeRun.output.original_probabilities || [];
+      const transProbs = activeRun.output.transformed_probabilities || [];
+      const barWidth = 26;
+      const chartHeight = 130;
+      const chartY = 190;
+
+      return (
+        <g>
+          <rect
+            width={width}
+            height={height}
+            rx="8"
+            fill="#1e293b"
+            stroke={isSelected ? '#38bdf8' : '#334155'}
+            strokeWidth={isSelected ? 2 : 1}
+          />
+          <text x="14" y="24" fill="#38bdf8" fontSize="13" fontWeight="bold">
+            Softmax Sensitivity & Distribution
+          </text>
+          <text x="14" y="40" fill="#64748b" fontSize="10">
+            Run: {activeRun?.run_id?.slice(0, 8)} | multiplier: {activeRun?.parameters?.multiplier ?? 1.0}
+          </text>
+
+          {/* Axes */}
+          <line x1="40" y1={chartY} x2={width - 30} y2={chartY} stroke="#475569" strokeWidth="1" />
+          <line x1="40" y1="55" x2="40" y2={chartY} stroke="#475569" strokeWidth="1" />
+
+          {/* Bars */}
+          {origProbs.map((pOrig: number, idx: number) => {
+            const pTrans = transProbs[idx] ?? pOrig;
+            const xBase = 65 + idx * 75;
+            const hOrig = Math.min(chartHeight, pOrig * chartHeight * 1.1);
+            const hTrans = Math.min(chartHeight, pTrans * chartHeight * 1.1);
+
+            return (
+              <g key={idx}>
+                {/* Original prob bar (blue) */}
+                <rect
+                  x={xBase}
+                  y={chartY - hOrig}
+                  width={barWidth}
+                  height={hOrig}
+                  fill="#38bdf8"
+                  opacity="0.85"
+                  rx="3"
+                />
+                <text x={xBase + barWidth / 2} y={chartY - hOrig - 4} fill="#94a3b8" fontSize="9" textAnchor="middle">
+                  {(pOrig * 100).toFixed(0)}%
+                </text>
+
+                {/* Transformed prob bar (emerald) */}
+                <rect
+                  x={xBase + barWidth + 4}
+                  y={chartY - hTrans}
+                  width={barWidth}
+                  height={hTrans}
+                  fill="#10b981"
+                  opacity="0.9"
+                  rx="3"
+                />
+                <text x={xBase + barWidth * 1.5 + 4} y={chartY - hTrans - 4} fill="#10b981" fontSize="9" textAnchor="middle">
+                  {(pTrans * 100).toFixed(0)}%
+                </text>
+
+                <text x={xBase + barWidth + 2} y={chartY + 16} fill="#cbd5e1" fontSize="10" textAnchor="middle">
+                  Item {idx + 1}
+                </text>
+              </g>
+            );
+          })}
+
+          {/* Legend */}
+          <rect x={width - 150} y="15" width="10" height="10" fill="#38bdf8" rx="2" />
+          <text x={width - 135} y="24" fill="#94a3b8" fontSize="10">Original Prob</text>
+          <rect x={width - 150} y="30" width="10" height="10" fill="#10b981" rx="2" />
+          <text x={width - 135} y="39" fill="#10b981" fontSize="10">Scaled Prob</text>
+        </g>
+      );
+    }
+
+    // 2. Causal Masking (Heatmap Matrix)
+    if (recipeId === 'causal_masking_v1' && activeRun?.output) {
+      const probs = activeRun.output.probabilities || [
+        [1.0, 0.0, 0.0],
+        [0.5, 0.5, 0.0],
+        [0.33, 0.33, 0.34],
+      ];
+      const cellSize = 48;
+      const startX = 65;
+      const startY = 70;
+
+      return (
+        <g>
+          <rect
+            width={width}
+            height={height}
+            rx="8"
+            fill="#1e293b"
+            stroke={isSelected ? '#38bdf8' : '#334155'}
+            strokeWidth={isSelected ? 2 : 1}
+          />
+          <text x="14" y="24" fill="#38bdf8" fontSize="13" fontWeight="bold">
+            Causal Attention Weights (Lower Triangular)
+          </text>
+          <text x="14" y="40" fill="#64748b" fontSize="10">
+            Masked tokens receive probability exactly 0.0 (future tokens excluded)
+          </text>
+
+          {/* Column labels */}
+          <text x={startX + 24} y={startY - 10} fill="#94a3b8" fontSize="10" textAnchor="middle">Pos 1</text>
+          <text x={startX + cellSize + 28} y={startY - 10} fill="#94a3b8" fontSize="10" textAnchor="middle">Pos 2</text>
+          <text x={startX + cellSize * 2 + 32} y={startY - 10} fill="#94a3b8" fontSize="10" textAnchor="middle">Pos 3</text>
+
+          {probs.map((row: number[], rIdx: number) => (
+            <g key={rIdx}>
+              {/* Row label */}
+              <text x={startX - 12} y={startY + rIdx * (cellSize + 6) + 28} fill="#94a3b8" fontSize="10" textAnchor="end">
+                Row {rIdx + 1}
+              </text>
+
+              {row.map((val: number, cIdx: number) => {
+                const isMasked = cIdx > rIdx;
+                const cellX = startX + cIdx * (cellSize + 4);
+                const cellY = startY + rIdx * (cellSize + 4);
+
+                return (
+                  <g key={cIdx}>
+                    <rect
+                      x={cellX}
+                      y={cellY}
+                      width={cellSize}
+                      height={cellSize}
+                      rx="4"
+                      fill={isMasked ? '#334155' : '#0284c7'}
+                      opacity={isMasked ? 0.35 : 0.2 + val * 0.8}
+                      stroke={isMasked ? '#475569' : '#38bdf8'}
+                      strokeWidth={1}
+                    />
+                    <text
+                      x={cellX + cellSize / 2}
+                      y={cellY + cellSize / 2 + 4}
+                      fill={isMasked ? '#64748b' : '#ffffff'}
+                      fontSize="11"
+                      fontWeight={isMasked ? 'normal' : 'bold'}
+                      textAnchor="middle"
+                    >
+                      {isMasked ? 'MASK' : `${(val * 100).toFixed(0)}%`}
+                    </text>
+                  </g>
+                );
+              })}
+            </g>
+          ))}
+        </g>
+      );
+    }
+
+    // 3. Attention Scaling (Variance vs Dimension Line Chart) - Default
+    const runResults = activeRun?.output?.results || [];
+    const maxVar = 140;
+
+    return (
+      <g>
+        <rect
+          width={width}
+          height={height}
+          rx="8"
+          fill="#1e293b"
+          stroke={isSelected ? '#38bdf8' : '#334155'}
+          strokeWidth={isSelected ? 2 : 1}
+        />
+        <text x="14" y="24" fill="#38bdf8" fontSize="13" fontWeight="bold">
+          {obj.payload.title || 'Score Variance Plot'}
+        </text>
+        <text x="14" y="40" fill="#64748b" fontSize="10">
+          Run ID: {activeRun?.run_id?.slice(0, 8) || 'active'} | seed: {activeRun?.seed ?? 42}
+        </text>
+
+        {/* Chart axes */}
+        <line x1="40" y1="210" x2="290" y2="210" stroke="#475569" strokeWidth="1" />
+        <line x1="40" y1="60" x2="40" y2="210" stroke="#475569" strokeWidth="1" />
+        <text x="55" y="226" fill="#94a3b8" fontSize="10">d_k: 8</text>
+        <text x="155" y="226" fill="#94a3b8" fontSize="10">32</text>
+        <text x="255" y="226" fill="#94a3b8" fontSize="10">128</text>
+        <text x="14" y="65" fill="#94a3b8" fontSize="9">Var</text>
+
+        {runResults.length > 0 ? (
+          <>
+            {/* Unscaled line (rose red) */}
+            <polyline
+              fill="none"
+              stroke="#f43f5e"
+              strokeWidth="2.5"
+              points={runResults
+                .map((r: any, idx: number) => {
+                  const px = 60 + idx * 100;
+                  const py = 210 - Math.min(150, (r.unscaled_variance / maxVar) * 150);
+                  return `${px},${py}`;
+                })
+                .join(' ')}
+            />
+            {/* Scaled line (emerald green) */}
+            <polyline
+              fill="none"
+              stroke="#10b981"
+              strokeWidth="2.5"
+              points={runResults
+                .map((r: any, idx: number) => {
+                  const px = 60 + idx * 100;
+                  const py = 210 - Math.min(150, (r.scaled_variance / 2.0) * 15);
+                  return `${px},${py}`;
+                })
+                .join(' ')}
+            />
+            {/* Legend */}
+            <circle cx="160" cy="72" r="4" fill="#f43f5e" />
+            <text x="170" y="76" fill="#f43f5e" fontSize="11">Unscaled Var</text>
+            <circle cx="240" cy="72" r="4" fill="#10b981" />
+            <text x="250" y="76" fill="#10b981" fontSize="11">Scaled Var (~1.0)</text>
+          </>
+        ) : (
+          <text x="90" y="140" fill="#64748b" fontSize="12">
+            Run numerical experiment to plot data
+          </text>
+        )}
+      </g>
+    );
+  };
+
   return (
     <div className="whiteboard-container">
       <div className="whiteboard-header">
         <div className="whiteboard-title">
           <span className="dot active" />
-          <span>Shared Whiteboard (Rev {scene.board_revision})</span>
+          <span>Shared Whiteboard (Revision {scene.board_revision})</span>
         </div>
         <span className="object-count">{renderedObjects.length} active objects</span>
       </div>
@@ -140,10 +376,6 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
             }
 
             if (obj.type === 'plot_ref') {
-              // Plot Reference rendered from actual run JSON output
-              const runResults = activeRun?.output?.results || [];
-              const maxVar = 140;
-
               return (
                 <g
                   key={obj.id}
@@ -151,69 +383,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
                   onClick={() => onSelectObject?.(obj)}
                   style={{ cursor: 'pointer' }}
                 >
-                  <rect
-                    width={width}
-                    height={height}
-                    rx="8"
-                    fill="#1e293b"
-                    stroke={isSelected ? '#38bdf8' : '#334155'}
-                    strokeWidth={isSelected ? 2 : 1}
-                  />
-                  <text x="14" y="24" fill="#38bdf8" fontSize="13" fontWeight="bold">
-                    {obj.payload.title || 'Score Variance Plot'}
-                  </text>
-                  <text x="14" y="40" fill="#64748b" fontSize="10">
-                    Run ID: {activeRun?.run_id?.slice(0, 8) || 'active'} | seed: {activeRun?.seed ?? 42}
-                  </text>
-
-                  {/* Chart axes */}
-                  <line x1="40" y1="210" x2="290" y2="210" stroke="#475569" strokeWidth="1" />
-                  <line x1="40" y1="60" x2="40" y2="210" stroke="#475569" strokeWidth="1" />
-                  <text x="40" y="226" fill="#94a3b8" fontSize="10">d_k: 8</text>
-                  <text x="150" y="226" fill="#94a3b8" fontSize="10">32</text>
-                  <text x="260" y="226" fill="#94a3b8" fontSize="10">128</text>
-                  <text x="14" y="65" fill="#94a3b8" fontSize="9">Var</text>
-
-                  {/* Unscaled line (red) and Scaled line (green) */}
-                  {runResults.length > 0 ? (
-                    <>
-                      {/* Unscaled line */}
-                      <polyline
-                        fill="none"
-                        stroke="#f43f5e"
-                        strokeWidth="2.5"
-                        points={runResults
-                          .map((r: any, idx: number) => {
-                            const px = 60 + idx * 100;
-                            const py = 210 - Math.min(150, (r.unscaled_variance / maxVar) * 150);
-                            return `${px},${py}`;
-                          })
-                          .join(' ')}
-                      />
-                      {/* Scaled line */}
-                      <polyline
-                        fill="none"
-                        stroke="#10b981"
-                        strokeWidth="2.5"
-                        points={runResults
-                          .map((r: any, idx: number) => {
-                            const px = 60 + idx * 100;
-                            const py = 210 - Math.min(150, (r.scaled_variance / 2.0) * 15);
-                            return `${px},${py}`;
-                          })
-                          .join(' ')}
-                      />
-                      {/* Legend */}
-                      <circle cx="160" cy="72" r="4" fill="#f43f5e" />
-                      <text x="170" y="76" fill="#f43f5e" fontSize="11">Unscaled Var</text>
-                      <circle cx="240" cy="72" r="4" fill="#10b981" />
-                      <text x="250" y="76" fill="#10b981" fontSize="11">Scaled Var (~1.0)</text>
-                    </>
-                  ) : (
-                    <text x="90" y="140" fill="#64748b" fontSize="12">
-                      Run experiment to view curve
-                    </text>
-                  )}
+                  {renderPlotContent(obj, width, height)}
                 </g>
               );
             }

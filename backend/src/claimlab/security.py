@@ -4,7 +4,7 @@ import hmac
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
-from fastapi import Cookie, Header, HTTPException, Request, status
+from fastapi import Cookie, Depends, Header, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from claimlab.config import settings
@@ -50,38 +50,35 @@ def create_guest(db: Session) -> Tuple[GuestOwner, str, str]:
 def get_current_guest(
     request: Request,
     claimlab_guest: Optional[str] = Cookie(None),
+    db: Session = Depends(get_db),
 ) -> GuestOwner:
     """FastAPI dependency to authenticate guest owner from cookie."""
-    db: Session = next(get_db())
-    try:
-        if not claimlab_guest:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={"code": "GUEST_REQUIRED", "message": "Guest cookie is missing"},
-            )
-
-        token_hash = hash_token(claimlab_guest)
-        now = datetime.now(timezone.utc)
-
-        owner = (
-            db.query(GuestOwner)
-            .filter(
-                GuestOwner.credential_hash == token_hash,
-                GuestOwner.deleted_at.is_(None),
-                GuestOwner.expires_at > now,
-            )
-            .first()
+    if not claimlab_guest:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "GUEST_REQUIRED", "message": "Guest cookie is missing"},
         )
 
-        if not owner:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail={"code": "GUEST_EXPIRED", "message": "Guest session invalid or expired"},
-            )
+    token_hash = hash_token(claimlab_guest)
+    now = datetime.now(timezone.utc)
 
-        return owner
-    finally:
-        db.close()
+    owner = (
+        db.query(GuestOwner)
+        .filter(
+            GuestOwner.credential_hash == token_hash,
+            GuestOwner.deleted_at.is_(None),
+            GuestOwner.expires_at > now,
+        )
+        .first()
+    )
+
+    if not owner:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "GUEST_EXPIRED", "message": "Guest session invalid or expired"},
+        )
+
+    return owner
 
 
 def verify_csrf(

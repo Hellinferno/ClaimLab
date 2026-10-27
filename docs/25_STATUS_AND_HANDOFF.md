@@ -15,13 +15,13 @@
 | Item | State |
 | --- | --- |
 | Application repository and code | Implemented (FastAPI backend + React/TypeScript frontend + contracts) |
-| Exact dependency locks | Resolved and locked (`backend/requirements.txt`, `frontend/package.json`) |
-| Meta account/model access | Configured for `muse-spark-1.3` (running in verified `fixture` mode until live key provided) |
+| Exact dependency locks | Resolved and locked (`backend/requirements.txt`, `backend/requirements.lock`, `frontend/package.json`) |
+| Meta account/model access | Configured for `muse-spark-1.3` (transparent `fixture` mode until live key provided) |
 | Runner runtime | Implemented with all 3 reviewed numerical recipes (`softmax_sensitivity_v1`, `attention_scaling_v1`, `causal_masking_v1`) |
-| Application tests | 11/11 tests passing (`test_numerics.py`, `test_api.py`) |
-| Frontend compilation | Production bundle built (`frontend/dist`, 22 modules, 0 TS errors) |
-| Linter | Ruff clean (0 errors) |
-| Public repository/submission | In progress |
+| Application tests | 18/18 tests passing (`test_numerics.py`, `test_api.py`, `test_complete_spec.py`) |
+| Frontend compilation | Production bundle built cleanly (`frontend/dist`, 22 modules, 0 TS errors) |
+| Linter | Ruff clean (0 errors, 20 fixed) |
+| Public repository/submission | Pushed to GitHub `https://github.com/Hellinferno/ClaimLab.git` on branch `main` |
 
 ---
 
@@ -76,6 +76,49 @@
 - Verify live background worker queue execution (`python -m claimlab.worker`)
 - Add end-to-end Playwright tests if browser automation is requested
 - Prepare demo video walkthrough script
+
+---
+
+## Progress Entry: 27 October 2026 (Day 2 — Atomic Whiteboard Engine, Task Bank, Worker & Spec Verification Suite)
+
+### 1. Active Environment & Repository
+- **Remote:** `https://github.com/Hellinferno/ClaimLab.git` (tracked to `main`)
+- **OS:** Windows 11, Shell: PowerShell
+- **Runtimes:** Python 3.12.10, Node v24.12.0, npm 11.6.2, Git 2.51.2
+- **Virtualenv:** `.venv` active with locked requirements in `backend/requirements.lock`
+
+### 2. Implemented Components & Files
+- **Atomic Whiteboard Patch Engine:**
+  - `backend/src/claimlab/whiteboard/engine.py`: Implemented `apply_atomic_patch` supporting `add_object`, `update_object`, `add_connector`, `highlight_objects`, `remove_object` (with cascading connector removal), `set_active_group`, and `clear_highlights`. Enforces 100 max objects, 20 max commands, label length limits, and LaTeX/HTML injection filtering.
+- **Task Bank & Learning Adaptation:**
+  - `backend/src/claimlab/learning/task_bank.py`: Implemented 12 canonical tasks from `docs/27_REFERENCE_LESSONS.md` with deterministic evaluation rubrics (number tolerances, normalized vectors, choice matching).
+  - `backend/src/claimlab/learning/adaptation.py`: Implemented two-variant progression rule before `supported_independently`, prerequisite scaffolding on error, and `TeachingDecision` recording.
+- **Background Worker Loop:**
+  - `backend/src/claimlab/worker.py`: Durable polling loop with leasing heartbeats, retry counts, error event logging, and cooperative cancellation.
+- **Infrastructure & Additional Reference Notes:**
+  - `examples/unsupported_sample.pdf`: Botany document to verify topic boundary classification.
+  - `examples/heldout_attention_note.pdf`: Transfer test document.
+  - `infra/runner/Dockerfile` & `infra/parser/Dockerfile`: Isolated container runner configurations.
+- **Enhanced Frontend UI:**
+  - `frontend/src/App.tsx`: Auto-resumes active session on reload (`/learning-sessions/active`), manages CSRF tokens, includes Idempotency-Key headers, supports custom PDF upload, and provides full data purge button.
+  - `frontend/src/components/Whiteboard.tsx`: Renders all 3 recipe outputs (Recipe A probability distribution bar chart, Recipe B variance vs dimension line chart, Recipe C causal lower-triangular heatmap grid).
+  - `frontend/src/components/TaskCard.tsx`: KaTeX math prompt rendering, choice button support, guided hint toggling, and epistemic tags (`[Source]`, `[Experiment]`, `[Background]`).
+  - `frontend/src/components/SourceViewer.tsx`: Extracted page text display and file upload trigger.
+
+### 3. Checks & Verification Evidence
+- **Pytest Suite:** 18/18 tests passed in 5.55s (`backend/tests/test_numerics.py`, `backend/tests/test_api.py`, `backend/tests/test_complete_spec.py`)
+  - `test_t_auth_01_guest_creation_and_cookie`: PASSED
+  - `test_t_board_01_atomic_patch_engine`: PASSED
+  - `test_t_tutor_01_unsupported_topic_boundary`: PASSED
+  - `test_t_learn_two_variant_progression`: PASSED
+  - `test_t_idem_01_idempotency_enforcement`: PASSED
+  - `test_t_job_cancel_endpoint`: PASSED
+  - `test_t_data_01_full_deletion_lifecycle`: PASSED
+  - `test_complete_learning_journey`: PASSED
+  - All 8 numerical recipe unit tests: PASSED
+- **Ruff Linter:** Clean across `backend/` (0 errors)
+- **Frontend Build:** `npm --prefix frontend run build` succeeded (486ms, 22 modules transformed, 0 TS errors)
+
 
 
 ## Next dependency-ready step

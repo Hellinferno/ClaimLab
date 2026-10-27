@@ -241,3 +241,49 @@ class IdempotencyRecord(Base):
     expires_at = Column(DateTime, nullable=False, index=True)
 
     __table_args__ = (UniqueConstraint("owner_id", "route_scope", "idempotency_key", name="uq_idempotency"),)
+
+
+class TaskAttempt(Base):
+    __tablename__ = "task_attempts"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id = Column(String(36), ForeignKey("learning_sessions.id"), nullable=False, index=True)
+    task_id = Column(String(64), nullable=False, index=True)
+    task_variant = Column(String(32), nullable=False)
+    learner_event_id = Column(String(36), nullable=False)
+    response_text = Column(Text, nullable=False)
+    rubric_version = Column(String(32), default="v1", nullable=False)
+    hint_count = Column(Integer, default=0, nullable=False)
+    attempt_index = Column(Integer, default=1, nullable=False)
+    assessment_status = Column(String(32), default="checked", nullable=False)
+    is_correct = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+
+
+class ToolInvocation(Base):
+    __tablename__ = "tool_invocations"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    job_id = Column(String(36), ForeignKey("jobs.id"), nullable=False, index=True)
+    provider_call_id = Column(String(64), nullable=False)
+    tool_name = Column(String(64), nullable=False)
+    argument_hash = Column(String(64), nullable=False)
+    status = Column(String(32), default="completed", nullable=False)
+    result_reference = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+
+    __table_args__ = (UniqueConstraint("job_id", "provider_call_id", name="uq_tool_invocation"),)
+
+
+class BudgetReservation(Base):
+    __tablename__ = "budget_reservations"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    owner_id = Column(String(36), ForeignKey("guest_owners.id"), nullable=False, index=True)
+    request_id = Column(String(64), nullable=False, index=True)
+    reserved_amount_usd = Column(Float, default=0.0, nullable=False)
+    settled_amount_usd = Column(Float, default=0.0, nullable=False)
+    status = Column(String(32), default="reserved", nullable=False)
+    model_name = Column(String(64), nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+

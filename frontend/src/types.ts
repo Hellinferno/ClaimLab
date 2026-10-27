@@ -26,6 +26,13 @@ export interface DocumentPageMeta {
   warnings: string[];
 }
 
+export interface DocumentPageDetail {
+  page_number: number;
+  normalized_text: string;
+  char_count: number;
+  anchors: SourceAnchor[];
+}
+
 export interface DocumentStatus {
   document_id: string;
   filename: string;

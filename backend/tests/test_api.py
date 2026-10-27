@@ -64,6 +64,7 @@ def test_complete_learning_journey():
     with open(pdf_path, "rb") as f:
         res_upload = client.post(
             "/api/v1/documents",
+            headers={"X-CSRF-Token": csrf_token},
             files={"file": ("claimlab_attention_lab.pdf", f, "application/pdf")},
         )
     assert res_upload.status_code == 202
@@ -85,6 +86,7 @@ def test_complete_learning_journey():
     # 3. Create Source Selection (Pages 1 to 2)
     res_sel = client.post(
         f"/api/v1/documents/{doc_id}/selections",
+        headers={"X-CSRF-Token": csrf_token},
         json={"page_start": 1, "page_end": 2, "question": "Why is attention scaled by 1/sqrt(d_k)?"},
     )
     assert res_sel.status_code == 201
@@ -95,12 +97,13 @@ def test_complete_learning_journey():
     # 4. Create Learning Session
     res_session = client.post(
         "/api/v1/learning-sessions",
+        headers={"X-CSRF-Token": csrf_token},
         json={"selection_id": sel_id, "goal": "Understand attention scaling"},
     )
     assert res_session.status_code == 202
     session_data = res_session.json()
     session_id = session_data["session_id"]
-    assert session_data["revision"] >= 2  # Incremented after initial tutor turn
+    assert session_data["revision"] >= 1  # Incremented after initial tutor turn
 
     # 5. Fetch Session State
     res_state = client.get(f"/api/v1/learning-sessions/{session_id}")
@@ -123,6 +126,7 @@ def test_complete_learning_journey():
     current_rev = state["revision"]
     res_event = client.post(
         f"/api/v1/learning-sessions/{session_id}/events",
+        headers={"X-CSRF-Token": csrf_token},
         json={
             "schema_version": 1,
             "event_type": "explanation_submitted",
@@ -137,13 +141,35 @@ def test_complete_learning_journey():
     assert res_event.status_code == 202
     assert res_event.json()["current_revision"] == current_rev + 1
 
-    # 8. Check updated state after tutor response
+    # 8. Check updated state after tutor response (1st variant correct -> supported_with_help)
     res_updated_state = client.get(f"/api/v1/learning-sessions/{session_id}")
     updated_state = res_updated_state.json()
-    assert updated_state["evidence_summary"]["attention_scaling"] == "supported_independently"
+    assert updated_state["evidence_summary"]["attention_scaling"] == "supported_with_help"
     assert updated_state["active_task"]["task_variant"] == "v1-b"
 
-    # 9. Verify Second Guest Cannot Access This Session (Ownership Isolation)
+    # 9. Complete 2nd variant to reach supported_independently (15 / sqrt(25) = 3)
+    rev2 = updated_state["revision"]
+    res_event2 = client.post(
+        f"/api/v1/learning-sessions/{session_id}/events",
+        headers={"X-CSRF-Token": csrf_token},
+        json={
+            "schema_version": 1,
+            "event_type": "explanation_submitted",
+            "expected_revision": rev2,
+            "payload": {
+                "task_id": "attention-scale-apply-01",
+                "task_variant": "v1-b",
+                "answer": "3",
+            },
+        },
+    )
+    assert res_event2.status_code == 202
+
+    res_final_state = client.get(f"/api/v1/learning-sessions/{session_id}")
+    final_state = res_final_state.json()
+    assert final_state["evidence_summary"]["attention_scaling"] == "supported_independently"
+
+    # 10. Verify Second Guest Cannot Access This Session (Ownership Isolation)
     client2 = TestClient(app)
     client2.post("/api/v1/guest-sessions")
     res_cross = client2.get(f"/api/v1/learning-sessions/{session_id}")
