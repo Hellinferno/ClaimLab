@@ -20,6 +20,49 @@ Build one responsive web application with a React/TypeScript interface, a Python
 
 The first release uses one application instance and one worker. SQLite is suitable for that deployment boundary. A move to multiple instances requires a deliberate database and queue change. Voice, unrestricted generated code, arbitrary research reproduction, and broad textbook coverage are later scope.
 
+## Quickstart & Local Execution
+
+### Prerequisites
+- Python 3.12+
+- Node.js 20+ & npm
+
+### 1. Backend Setup
+```bash
+# Activate virtual environment
+.\.venv\Scripts\Activate.ps1   # On Windows (or source .venv/bin/activate on Linux/macOS)
+
+# Run full test suite (18 unit & acceptance tests)
+pytest backend/tests/ -v
+
+# Start FastAPI application
+python -m uvicorn claimlab.api:app --host 127.0.0.1 --port 8000 --reload
+```
+
+### 2. Frontend Setup
+```bash
+# Install dependencies
+npm --prefix frontend install
+
+# Build production bundle
+npm --prefix frontend run build
+
+# Start Vite dev server
+npm --prefix frontend run dev
+```
+Open [http://localhost:5173](http://localhost:5173) in your browser.
+
+### 3. Background Worker (Optional / Async Job Execution)
+```bash
+python -m claimlab.worker
+```
+
+### 4. Meta Model Configuration
+By default, the application runs in verified deterministic `fixture` mode using `MODEL_MODE=fixture` and `META_MODEL=muse-spark-1.3`.
+To connect to the live Meta API:
+1. Copy `.env.example` to `.env`.
+2. Set `MODEL_MODE=live` and enter your `META_API_KEY`.
+
+
 ## Documentation map
 
 | Document | What it answers |
