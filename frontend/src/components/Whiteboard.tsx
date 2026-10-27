@@ -24,8 +24,8 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
 
     // 1. Softmax Sensitivity (Bar Chart)
     if (recipeId === 'softmax_sensitivity_v1' && activeRun?.output) {
-      const origProbs = activeRun.output.original_probabilities || [];
-      const transProbs = activeRun.output.transformed_probabilities || [];
+      const origProbs = activeRun.output.base_probabilities || activeRun.output.original_probabilities || [];
+      const transProbs = activeRun.output.scaled_probabilities || activeRun.output.transformed_probabilities || [];
       const barWidth = 26;
       const chartHeight = 130;
       const chartY = 190;
@@ -106,7 +106,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({
 
     // 2. Causal Masking (Heatmap Matrix)
     if (recipeId === 'causal_masking_v1' && activeRun?.output) {
-      const probs = activeRun.output.probabilities || [
+      const probs = activeRun.output.masked_weights || activeRun.output.probabilities || [
         [1.0, 0.0, 0.0],
         [0.5, 0.5, 0.0],
         [0.33, 0.33, 0.34],

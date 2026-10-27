@@ -18,7 +18,7 @@
 | Exact dependency locks | Resolved and locked (`backend/requirements.txt`, `backend/requirements.lock`, `frontend/package.json`) |
 | Meta account/model access | Configured for `muse-spark-1.3` (transparent `fixture` mode until live key provided) |
 | Runner runtime | Implemented with all 3 reviewed numerical recipes (`softmax_sensitivity_v1`, `attention_scaling_v1`, `causal_masking_v1`) |
-| Application tests | 18/18 tests passing (`test_numerics.py`, `test_api.py`, `test_complete_spec.py`) |
+| Application tests | 21/21 tests passing (`test_numerics.py`, `test_api.py`, `test_complete_spec.py`) |
 | Frontend compilation | Production bundle built cleanly (`frontend/dist`, 22 modules, 0 TS errors) |
 | Linter | Ruff clean (0 errors, 20 fixed) |
 | Public repository/submission | Pushed to GitHub `https://github.com/Hellinferno/ClaimLab.git` on branch `main` |

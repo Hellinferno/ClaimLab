@@ -338,3 +338,167 @@ def test_t_data_01_full_deletion_lifecycle():
 
     # Guest is immediately rejected
     assert client.get("/api/v1/me").status_code == 401
+
+
+def test_t_worker_01_claim_and_recovery():
+    """Verifies durable worker job leasing, execution, and lease expiry recovery."""
+    from datetime import datetime, timezone, timedelta
+    import uuid
+    from claimlab.database import SessionLocal
+    from claimlab.models import Job, GuestOwner
+    from claimlab.contracts.common import JobStatus, JobKind
+    from claimlab.worker import claim_next_job, run_worker_loop
+
+    db = SessionLocal()
+    try:
+        # Create dummy guest
+        guest_id = str(uuid.uuid4())
+        guest = GuestOwner(
+            id=guest_id,
+            credential_hash=f"hash_{uuid.uuid4()}",
+            csrf_secret_hash=f"csrf_{uuid.uuid4()}",
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+        db.add(guest)
+
+        # 1. Test Claiming Queued Job
+        job_id = str(uuid.uuid4())
+        job = Job(
+            id=job_id,
+            owner_id=guest_id,
+            kind=JobKind.TUTOR_TURN.value,
+            status=JobStatus.QUEUED.value,
+            cancelled=False,
+        )
+        db.add(job)
+        db.commit()
+
+        claimed = claim_next_job(db)
+        assert claimed is not None
+        assert claimed.id == job_id
+        assert claimed.status == JobStatus.RUNNING.value
+        assert claimed.lease_expires_at is not None
+
+        # 2. Test Stale Lease Recovery (WORKER_LOST)
+        claimed.lease_expires_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        db.commit()
+
+        run_worker_loop(once=True)
+
+        db.refresh(claimed)
+        assert claimed.status == JobStatus.FAILED.value
+        assert claimed.error_code == "WORKER_LOST"
+    finally:
+        db.close()
+
+
+def test_t_journey_02_heldout_note_transfer():
+    """Verifies system robustness when processing an alternate heldout transfer note."""
+    client = TestClient(app)
+    res_guest = client.post("/api/v1/guest-sessions")
+    csrf = res_guest.json()["csrf_token"]
+
+    with open("examples/heldout_attention_note.pdf", "rb") as f:
+        res_up = client.post(
+            "/api/v1/documents",
+            headers={"X-CSRF-Token": csrf},
+            files={"file": ("heldout_attention_note.pdf", f, "application/pdf")},
+        )
+    assert res_up.status_code == 202
+    doc_id = res_up.json()["document_id"]
+
+    res_pages = client.get(f"/api/v1/documents/{doc_id}/pages")
+    assert res_pages.status_code == 200
+    pages_data = res_pages.json()
+    assert len(pages_data) >= 1
+
+    res_sel = client.post(
+        f"/api/v1/documents/{doc_id}/selections",
+        headers={"X-CSRF-Token": csrf},
+        json={"page_start": 1, "page_end": 1, "question": "Explain dot product attention transfer"},
+    )
+    assert res_sel.status_code == 201
+    sel_id = res_sel.json()["selection_id"]
+
+    res_sess = client.post(
+        "/api/v1/learning-sessions",
+        headers={"X-CSRF-Token": csrf},
+        json={"selection_id": sel_id, "goal": "Transfer attention concepts"},
+    )
+    assert res_sess.status_code == 202
+    sess_id = res_sess.json()["session_id"]
+
+    res_state = client.get(f"/api/v1/learning-sessions/{sess_id}")
+    assert res_state.status_code == 200
+    assert len(res_state.json()["board"]["objects"]) >= 4
+
+
+def test_t_recipe_ac_integration():
+    """Verifies direct execution of Recipe A (Softmax) and Recipe C (Causal Masking) in active session."""
+    client = TestClient(app)
+    res_guest = client.post("/api/v1/guest-sessions")
+    csrf = res_guest.json()["csrf_token"]
+
+    with open("examples/claimlab_attention_lab.pdf", "rb") as f:
+        res_up = client.post(
+            "/api/v1/documents",
+            headers={"X-CSRF-Token": csrf},
+            files={"file": ("claimlab_attention_lab.pdf", f, "application/pdf")},
+        )
+    doc_id = res_up.json()["document_id"]
+
+    res_sel = client.post(
+        f"/api/v1/documents/{doc_id}/selections",
+        headers={"X-CSRF-Token": csrf},
+        json={"page_start": 1, "page_end": 2, "question": "Compare Softmax & Masking"},
+    )
+    sel_id = res_sel.json()["selection_id"]
+
+    res_sess = client.post(
+        "/api/v1/learning-sessions",
+        headers={"X-CSRF-Token": csrf},
+        json={"selection_id": sel_id, "goal": "Recipe execution check"},
+    )
+    sess_id = res_sess.json()["session_id"]
+
+    # Execute Recipe A (Softmax Sensitivity)
+    res_run_a = client.post(
+        f"/api/v1/learning-sessions/{sess_id}/runs",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "recipe_id": "softmax_sensitivity_v1",
+            "parameters": {
+                "logits": [1.0, 2.0, 3.0],
+                "multiplier": 2.0,
+                "seed": 42,
+            },
+        },
+    )
+    assert res_run_a.status_code == 202
+    run_a_id = res_run_a.json()["run_id"]
+
+    run_a_detail = client.get(f"/api/v1/runs/{run_a_id}").json()
+    assert run_a_detail["status"] == "succeeded"
+    assert len(run_a_detail["output"]["base_probabilities"]) == 3
+    assert len(run_a_detail["output"]["scaled_probabilities"]) == 3
+
+    # Execute Recipe C (Causal Masking)
+    res_run_c = client.post(
+        f"/api/v1/learning-sessions/{sess_id}/runs",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "recipe_id": "causal_masking_v1",
+            "parameters": {
+                "scores": [[1.0, 2.0], [3.0, 4.0]],
+                "seed": 42,
+            },
+        },
+    )
+    assert res_run_c.status_code == 202
+    run_c_id = res_run_c.json()["run_id"]
+
+    run_c_detail = client.get(f"/api/v1/runs/{run_c_id}").json()
+    assert run_c_detail["status"] == "succeeded"
+    # Row 0, Col 1 is future token (masked to 0.0)
+    assert run_c_detail["output"]["masked_weights"][0][1] == 0.0
+
