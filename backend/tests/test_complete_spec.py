@@ -502,3 +502,128 @@ def test_t_recipe_ac_integration():
     # Row 0, Col 1 is future token (masked to 0.0)
     assert run_c_detail["output"]["masked_weights"][0][1] == 0.0
 
+
+def test_t_pdf_02_and_03_validation_boundaries():
+    """Verifies rejection of non-PDFs, oversize uploads, and quota limits (T-PDF-02, T-PDF-03)."""
+    client = TestClient(app)
+    res_guest = client.post("/api/v1/guest-sessions")
+    csrf = res_guest.json()["csrf_token"]
+
+    # 1. Non-PDF rejected
+    res_txt = client.post(
+        "/api/v1/documents",
+        headers={"X-CSRF-Token": csrf},
+        files={"file": ("notes.txt", b"Hello world", "text/plain")},
+    )
+    assert res_txt.status_code == 422
+    assert res_txt.json()["error"]["code"] == "UNSUPPORTED_DOCUMENT"
+
+    # 2. Oversize (>10 MiB) rejected
+    big_bytes = b"%PDF-1.4 " + b"0" * (11 * 1024 * 1024)
+    res_big = client.post(
+        "/api/v1/documents",
+        headers={"X-CSRF-Token": csrf},
+        files={"file": ("huge.pdf", big_bytes, "application/pdf")},
+    )
+    assert res_big.status_code == 413
+    assert res_big.json()["error"]["code"] == "UPLOAD_TOO_LARGE"
+
+    # 3. Owner quota: max 3 documents
+    with open("examples/claimlab_attention_lab.pdf", "rb") as f:
+        pdf_bytes = f.read()
+
+    for i in range(3):
+        res_ok = client.post(
+            "/api/v1/documents",
+            headers={"X-CSRF-Token": csrf},
+            files={"file": (f"doc_{i}.pdf", pdf_bytes, "application/pdf")},
+        )
+        assert res_ok.status_code == 202
+
+    # 4th upload rejected due to quota limit
+    res_exceeded = client.post(
+        "/api/v1/documents",
+        headers={"X-CSRF-Token": csrf},
+        files={"file": ("doc_overflow.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert res_exceeded.status_code == 422
+    assert res_exceeded.json()["error"]["code"] == "PARAMETERS_INVALID"
+
+
+def test_t_state_01_revision_conflict_rejection():
+    """Verifies optimistic concurrency: stale revision numbers are rejected with 409 (T-STATE-01)."""
+    client = TestClient(app)
+    res_guest = client.post("/api/v1/guest-sessions")
+    csrf = res_guest.json()["csrf_token"]
+
+    with open("examples/claimlab_attention_lab.pdf", "rb") as f:
+        res_up = client.post(
+            "/api/v1/documents",
+            headers={"X-CSRF-Token": csrf},
+            files={"file": ("claimlab_attention_lab.pdf", f, "application/pdf")},
+        )
+    doc_id = res_up.json()["document_id"]
+
+    res_sel = client.post(
+        f"/api/v1/documents/{doc_id}/selections",
+        headers={"X-CSRF-Token": csrf},
+        json={"page_start": 1, "page_end": 2, "question": "Revision conflict test"},
+    )
+    sel_id = res_sel.json()["selection_id"]
+
+    res_sess = client.post(
+        "/api/v1/learning-sessions",
+        headers={"X-CSRF-Token": csrf},
+        json={"selection_id": sel_id, "goal": "Conflict test"},
+    )
+    sess_id = res_sess.json()["session_id"]
+    real_rev = res_sess.json()["revision"]
+
+    # Send event with stale/mismatched revision
+    res_stale = client.post(
+        f"/api/v1/learning-sessions/{sess_id}/events",
+        headers={"X-CSRF-Token": csrf},
+        json={
+            "schema_version": 1,
+            "event_type": "explanation_submitted",
+            "expected_revision": real_rev + 99,
+            "payload": {"task_id": "dummy", "answer": "1"},
+        },
+    )
+    assert res_stale.status_code == 409
+    assert res_stale.json()["error"]["code"] == "REVISION_CONFLICT"
+
+
+def test_t_src_02_invalid_page_range_rejection():
+    """Verifies selection validation rejects inverted or out-of-bounds page ranges (T-SRC-02)."""
+    client = TestClient(app)
+    res_guest = client.post("/api/v1/guest-sessions")
+    csrf = res_guest.json()["csrf_token"]
+
+    with open("examples/claimlab_attention_lab.pdf", "rb") as f:
+        res_up = client.post(
+            "/api/v1/documents",
+            headers={"X-CSRF-Token": csrf},
+            files={"file": ("claimlab_attention_lab.pdf", f, "application/pdf")},
+        )
+    doc_id = res_up.json()["document_id"]
+
+    # Inverted range: page_start > page_end
+    res_inv = client.post(
+        f"/api/v1/documents/{doc_id}/selections",
+        headers={"X-CSRF-Token": csrf},
+        json={"page_start": 3, "page_end": 1, "question": "Inverted"},
+    )
+    assert res_inv.status_code == 422
+    assert res_inv.json()["error"]["code"] == "PARAMETERS_INVALID"
+
+    # Out-of-bounds range: page_end > page_count (3) but within max schema limit (50)
+    res_oob = client.post(
+        f"/api/v1/documents/{doc_id}/selections",
+        headers={"X-CSRF-Token": csrf},
+        json={"page_start": 1, "page_end": 5, "question": "Out of bounds"},
+    )
+    assert res_oob.status_code == 422
+    assert res_oob.json()["error"]["code"] == "PARAMETERS_INVALID"
+
+
