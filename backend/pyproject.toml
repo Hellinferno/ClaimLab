@@ -30,3 +30,8 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+markers = [
+    "live_meta: tests requiring live Meta Model API credentials",
+]
