@@ -432,12 +432,42 @@ class AgentOrchestrator:
         self.db.add(budget)
         self.db.commit()
 
+        # Handle learner evidence and learning adaptation if responding to student
+        active_task = None
+        if recent_events and recent_events[0].event_type in (
+            "prediction_submitted",
+            "explanation_submitted",
+            "message_submitted",
+            "connection_submitted",
+        ):
+            last_event = recent_events[0]
+            try:
+                payload = json.loads(last_event.payload_json)
+                answer = payload.get("answer", payload.get("edges", ""))
+                task_id = payload.get("task_id", "attention-scale-apply-01")
+                task_variant = payload.get("task_variant", "v1-a")
+
+                ev, dec, next_t = update_evidence_and_decide(
+                    self.db,
+                    session.id,
+                    last_event,
+                    task_id,
+                    task_variant,
+                    answer,
+                    hints_used=0,
+                )
+                if next_t:
+                    active_task = next_t
+            except Exception as e:
+                logger.warning(f"Error updating learner evidence: {e}")
+
         max_iterations = 4
         iterations = 0
         final_narration = ""
-        active_task = None
         new_run_id = None
-        updated_scene = current_scene
+        next_revision = session.revision + 1
+        updated_scene = current_scene.model_copy(deep=True)
+        updated_scene.board_revision = next_revision
 
         with httpx.Client(timeout=25.0) as client:
             while iterations < max_iterations:
@@ -497,25 +527,72 @@ class AgentOrchestrator:
                     elif fn_name == "run_experiment":
                         rec_id = fn_args.get("recipe_id")
                         params = fn_args.get("parameters", {})
-                        run_res = runner.run(rec_id, params)
-                        new_run_id = run_res.run_id
-                        tool_result = {
-                            "run_id": run_res.run_id,
-                            "status": run_res.status,
-                            "output": run_res.output,
-                        }
+                        # Parameter normalizations for LLMs
+                        if rec_id == "attention_scaling_v1":
+                            if "dimensions" not in params:
+                                d = params.get("dimension", params.get("d_k", 64))
+                                params["dimensions"] = [d] if isinstance(d, int) else list(d)
+                            if "n_keys" not in params:
+                                params["n_keys"] = params.get("keys", 4)
+                            if "trials" not in params:
+                                params["trials"] = min(200, max(20, params.get("num_samples", params.get("samples", 100))))
+                        elif rec_id == "softmax_sensitivity_v1":
+                            if "logits" not in params:
+                                params["logits"] = params.get("scores", [2.0, 1.0, 0.1])
+                            if "multiplier" not in params:
+                                params["multiplier"] = params.get("scale", params.get("temperature", 2.0))
+                        elif rec_id == "causal_masking_v1":
+                            if "scores" not in params:
+                                params["scores"] = [
+                                    [1.0, 2.0, 0.5],
+                                    [0.5, 1.5, 2.0],
+                                    [1.2, 0.8, 1.0]
+                                ]
+
+                        try:
+                            run_res = runner.run(rec_id, params)
+                            new_run_id = run_res.run_id
+                            tool_result = {
+                                "run_id": run_res.run_id,
+                                "status": run_res.status,
+                                "output": run_res.output,
+                            }
+                        except Exception as e:
+                            tool_result = {"status": "rejected", "error": str(e)}
 
                     elif fn_name == "present_teaching_step":
                         final_narration = fn_args.get("narration", "")
                         active_task = fn_args.get("active_task")
                         board_cmds = fn_args.get("board_commands", [])
                         if board_cmds:
-                            patch = BoardPatch(
-                                schema_version=1,
-                                base_board_revision=updated_scene.board_revision,
-                                commands=board_cmds,
-                            )
-                            updated_scene = apply_atomic_patch(updated_scene, patch)
+                            valid_cmds = []
+                            for cmd in board_cmds:
+                                if isinstance(cmd, dict):
+                                    if "action" in cmd and "op" not in cmd:
+                                        if cmd["action"] in ("add_text", "add_object"):
+                                            cmd["op"] = "add_object"
+                                            if "object" not in cmd:
+                                                cmd["object"] = {
+                                                    "id": f"obj_{len(updated_scene.objects) + 1}",
+                                                    "type": "concept_card",
+                                                    "label": cmd.get("text", "Concept Note"),
+                                                    "position": {"x": 50.0, "y": 50.0},
+                                                }
+                                    if "op" in cmd and cmd["op"] in (
+                                        "add_object", "update_object", "add_connector",
+                                        "highlight_objects", "remove_object", "set_active_group", "clear_highlights"
+                                    ):
+                                        valid_cmds.append(cmd)
+                            if valid_cmds:
+                                try:
+                                    patch = BoardPatch(
+                                        schema_version=1,
+                                        base_board_revision=updated_scene.board_revision,
+                                        commands=valid_cmds,
+                                    )
+                                    updated_scene = apply_atomic_patch(updated_scene, patch)
+                                except Exception as e:
+                                    logger.warning(f"Skipping invalid model board commands: {e}")
                         tool_result = {"status": "step_committed", "revision": updated_scene.board_revision}
 
                     tool_inv.status = "completed"
@@ -532,6 +609,115 @@ class AgentOrchestrator:
         budget.settled_amount_usd = 0.005
         self.db.commit()
 
+        # Ensure initial concept evidence exists
+        ev_exists = self.db.query(ConceptEvidence).filter(
+            ConceptEvidence.session_id == session.id,
+            ConceptEvidence.concept_id == "attention_scaling",
+        ).first()
+        if not ev_exists:
+            ev_init = ConceptEvidence(
+                session_id=session.id,
+                concept_id="attention_scaling",
+                category=EvidenceCategory.INTRODUCED.value,
+                assistance_level=AssistanceLevel.NONE.value,
+                assessment_status=AssessmentStatus.CHECKED.value,
+                rationale="Introduced attention scaling formula and simulated variance comparison experiment.",
+            )
+            self.db.add(ev_init)
+            self.db.commit()
+
+        # Ensure active experiment run exists for grounding
+        if not new_run_id and (session.revision <= 1 or not updated_scene.objects):
+            init_exp = runner.run("attention_scaling_v1", {"dimensions": [16, 32, 64, 128], "n_keys": 4, "trials": 50, "seed": 42})
+            new_run_id = init_exp.run_id
+            db_run = ExperimentRun(
+                id=init_exp.run_id,
+                owner_id=session.owner_id,
+                session_id=session.id,
+                recipe_id="attention_scaling_v1",
+                parameter_hash=init_exp.parameter_hash,
+                parameters_json=json.dumps({"dimensions": [16, 32, 64, 128], "n_keys": 4, "trials": 50, "seed": 42}),
+                seed=42,
+                status="succeeded",
+                output_json=json.dumps(init_exp.output),
+                checks_json=json.dumps([c.model_dump() for c in init_exp.checks]),
+            )
+            self.db.add(db_run)
+            self.db.commit()
+
+        # Seed initial whiteboard objects if model provided text-only narration
+        if len(updated_scene.objects) < 4:
+            initial_objects = [
+                BoardObject(
+                    id="node-q",
+                    type=ObjectType.CONCEPT_NODE,
+                    position=Position(x=50, y=60),
+                    dimensions=Dimensions(width=140, height=60),
+                    label="Query Vector (Q)",
+                    concept_id="query_key_scores",
+                    payload={"title": "Query (Q)", "description": "Current token representation"},
+                ),
+                BoardObject(
+                    id="node-k",
+                    type=ObjectType.CONCEPT_NODE,
+                    position=Position(x=230, y=60),
+                    dimensions=Dimensions(width=140, height=60),
+                    label="Key Vectors (K)",
+                    concept_id="query_key_scores",
+                    payload={"title": "Keys (K)", "description": "Context tokens representations"},
+                ),
+                BoardObject(
+                    id="node-scores",
+                    type=ObjectType.CONCEPT_NODE,
+                    position=Position(x=140, y=160),
+                    dimensions=Dimensions(width=160, height=60),
+                    label="Raw Scores S = Q·K^T",
+                    concept_id="attention_scaling",
+                    payload={"title": "Raw Dot Products", "description": "Var(S) grows proportionally to d_k"},
+                ),
+                BoardObject(
+                    id="eq-scaling",
+                    type=ObjectType.EQUATION,
+                    position=Position(x=80, y=250),
+                    dimensions=Dimensions(width=280, height=70),
+                    label="Scaled Attention Formula",
+                    concept_id="attention_scaling",
+                    payload={"latex": r"\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{Q K^T}{\sqrt{d_k}}\right) V"},
+                ),
+                BoardObject(
+                    id="plot-scaling-var",
+                    type=ObjectType.PLOT_REF,
+                    position=Position(x=420, y=60),
+                    dimensions=Dimensions(width=320, height=260),
+                    label="Variance vs Key Dimension",
+                    concept_id="attention_scaling",
+                    payload={
+                        "run_id": new_run_id,
+                        "field": "results",
+                        "title": "Score Variance: Scaled vs Unscaled",
+                        "x_label": "Key Dimension (d_k)",
+                        "y_label": "Variance",
+                    },
+                ),
+            ]
+            patch = BoardPatch(
+                schema_version=1,
+                base_board_revision=updated_scene.board_revision,
+                commands=[AddObjectCommand(object=obj) for obj in initial_objects],
+            )
+            updated_scene = apply_atomic_patch(updated_scene, patch)
+
+        if not active_task:
+            active_task = {
+                "task_id": "attention-scale-apply-01",
+                "task_variant": "v1-a",
+                "question": "A score is 12 and key dimension is 16. What is the scaled score (12 / sqrt(16))?",
+                "expected_type": "number",
+            }
+
+        if not final_narration:
+            final_narration = "Let us examine how scaling dot products stabilizes variance across dimensions."
+
         # Save snapshot
         snapshot = BoardSnapshot(
             session_id=session.id,
@@ -542,6 +728,22 @@ class AgentOrchestrator:
         self.db.add(snapshot)
         session.revision = updated_scene.board_revision
         session.active_job_id = None
+        self.db.commit()
+
+        # Emit job event
+        event_count = self.db.query(JobEvent).filter(JobEvent.job_id == job_id).count()
+        event = JobEvent(
+            job_id=job_id,
+            sequence=event_count + 1,
+            event_type="tutor_turn_completed",
+            payload_json=json.dumps({
+                "narration": final_narration,
+                "revision": updated_scene.board_revision,
+                "active_task": active_task,
+                "run_id": new_run_id,
+            }),
+        )
+        self.db.add(event)
         self.db.commit()
 
         return {

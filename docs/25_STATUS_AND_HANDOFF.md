@@ -16,11 +16,12 @@
 | --- | --- |
 | Application repository and code | Implemented (FastAPI backend + React/TypeScript frontend + contracts) |
 | Exact dependency locks | Resolved and locked (`backend/requirements.txt`, `backend/requirements.lock`, `frontend/package.json`) |
-| Meta account/model access | Configured for `muse-spark-1.3` (transparent `fixture` mode until live key provided) |
+| Meta account/model access | Verified live (`muse-spark-1.3`, `T-META-01` & `T-META-02` passed with function calling) |
 | Runner runtime | Implemented with all 3 reviewed numerical recipes (`softmax_sensitivity_v1`, `attention_scaling_v1`, `causal_masking_v1`) |
-| Application tests | 25/25 tests passing (`test_numerics.py`, `test_api.py`, `test_complete_spec.py`, `test_evaluation_harness.py`) |
+| Application tests | 27/27 tests passing (`test_numerics.py`, `test_api.py`, `test_complete_spec.py`, `test_evaluation_harness.py`, `test_live_meta.py`) |
+| Behavioral Evaluation Benchmark | 12/12 cases passed (100%) in `backend/src/claimlab/evaluation/benchmark.py` |
 | Frontend compilation | Production bundle built cleanly (`frontend/dist`, 22 modules, 0 TS errors) |
-| Linter | Ruff clean (0 errors, 20 fixed) |
+| Linter | Ruff clean (0 errors) |
 | Public repository/submission | Pushed to GitHub `https://github.com/Hellinferno/ClaimLab.git` on branch `main` |
 
 ---
@@ -119,11 +120,39 @@
 - **Ruff Linter:** Clean across `backend/` (0 errors)
 - **Frontend Build:** `npm --prefix frontend run build` succeeded (486ms, 22 modules transformed, 0 TS errors)
 
+---
 
+## Progress Entry: 27 October 2026 (Day 3 — Live Meta Model Tool Loop Verified & Production Harness Complete)
+
+### 1. Active Environment & Repository
+- **Remote:** `https://github.com/Hellinferno/ClaimLab.git` (tracked to `main`)
+- **OS:** Windows 11, Shell: PowerShell
+- **Runtimes:** Python 3.12.10, Node v24.12.0, npm 11.6.2, Git 2.51.2
+- **Virtualenv:** `.venv` active with locked requirements
+- **Active Model Target:** Meta `muse-spark-1.3` in `live` mode
+
+### 2. Implemented Requirements & Changed Files
+- **Live Meta Model Adapter & Telemetry:**
+  - `backend/src/claimlab/scripts/probe_meta_api.py`: Automated CLI verification probe for `T-META-01` with sanitized token/latency diagnostics.
+  - `backend/tests/test_live_meta.py`: Acceptance tests for `T-META-01` (provider probe) and `T-META-02` (live orchestrator tool loop).
+  - `backend/src/claimlab/services/agent_orchestrator.py`: Hardened live tool loop with parameter normalizations (`attention_scaling_v1`, `softmax_sensitivity_v1`, `causal_masking_v1`), safe board patch recovery, student evidence progression, and job event emission.
+- **Test Invariant Separation:**
+  - `backend/tests/test_api.py`, `backend/tests/test_complete_spec.py`, `backend/tests/test_evaluation_harness.py`: Wired deterministic fixtures for offline reproducibility, while `test_live_meta.py` exercises the real Meta API endpoint.
+- **Evaluation Benchmark:**
+  - `backend/src/claimlab/evaluation/benchmark.py`: 12/12 behavioral evaluation cases passing (100%) in both live and fixture modes.
+
+### 3. Checks & Verification Evidence
+- **Pytest Suite:** 27/27 tests PASSED in 16.87s
+  - `test_t_meta_01_provider_probe`: PASSED against Meta API (HTTP 200, latency ~2.6s)
+  - `test_t_meta_02_orchestrator_live_turn`: PASSED with tool loop execution (`run_experiment`, `present_teaching_step`)
+  - All 25 complete spec and numerical recipe tests: PASSED
+- **Behavioral Evaluation Benchmark:** 12/12 cases PASSED (100.0%) in 91.81s (`reports/evaluation_benchmark_report.json`)
+- **Ruff Linter:** Clean across `backend/` (0 errors)
+- **Frontend Build:** `npm --prefix frontend run build` succeeded (556ms, 0 TS errors)
 
 ## Next dependency-ready step
 
-Inspect the actual coding workspace and execute M0 from [the implementation plan](15_IMPLEMENTATION_PLAN.md): establish source projects/contracts, verify the real model tool loop if credentials are available, and prove the restricted numerical runner. Keep fixture mode explicit when access is missing.
+Deploy or host single-instance preview, finalize video recording / walkthrough script, and generate the final Hackathon submission kit.
 
 ## Handoff format for future sessions
 

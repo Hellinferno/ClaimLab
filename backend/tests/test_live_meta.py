@@ -3,9 +3,10 @@
 These tests run only when MODEL_MODE=live and META_API_KEY is configured.
 """
 import pytest
+from datetime import datetime, timezone, timedelta
 from claimlab.config import settings
 from claimlab.database import SessionLocal, Base, engine
-from claimlab.models import LearningSession, Document, SourceAnchor
+from claimlab.models import GuestOwner, LearningSession, Document, SourceAnchor, SourceSelection, Job
 from claimlab.contracts.whiteboard import SceneGraph
 from claimlab.services.agent_orchestrator import AgentOrchestrator
 
@@ -60,44 +61,86 @@ def test_t_meta_02_orchestrator_live_turn(db):
         pytest.skip("META_API_KEY is not set or MODEL_MODE != 'live'. Skipping live Meta API test.")
 
     # Setup test learning session
+    import uuid
+    uid = str(uuid.uuid4())
+    expires = datetime.now(timezone.utc) + timedelta(days=1)
+    owner = GuestOwner(
+        id=uid,
+        credential_hash=f"hash_{uid}",
+        csrf_secret_hash=f"csrf_{uid}",
+        expires_at=expires,
+    )
+    db.add(owner)
+    db.commit()
+
     doc = Document(
-        owner_id="live-tester",
+        id=f"doc_{uid}",
+        owner_id=owner.id,
         filename="live_probe.pdf",
+        storage_key="/dev/null",
         sha256="fake-hash",
-        storage_path="/dev/null",
-        status="parsed",
+        size_bytes=100,
+        extraction_status="completed",
         page_count=1,
+        expires_at=expires,
     )
     db.add(doc)
     db.commit()
 
     anchor = SourceAnchor(
+        id=f"anc_{uid}",
         document_id=doc.id,
         page_number=1,
-        anchor_id="anchor-1",
         quote="Attention is all you need.",
-        char_start=0,
-        char_end=26,
+        start_offset=0,
+        end_offset=26,
+        text_hash="hash_quote_1",
     )
     db.add(anchor)
     db.commit()
 
+    sel = SourceSelection(
+        id=f"sel_{uid}",
+        owner_id=owner.id,
+        document_id=doc.id,
+        page_start=1,
+        page_end=1,
+        question="How does attention scaling work?",
+        content_hash="hash_selection_1",
+        topic_assessment="supported",
+    )
+    db.add(sel)
+    db.commit()
+
     ls = LearningSession(
-        owner_id="live-tester",
-        source_document_id=doc.id,
+        id=f"sess_{uid}",
+        owner_id=owner.id,
+        selection_id=sel.id,
         goal="Verify live tutor loop",
         revision=1,
         active_concept="attention_scaling",
+        expires_at=expires,
     )
     db.add(ls)
     db.commit()
 
+    test_job = Job(
+        id=f"job_{uid}",
+        owner_id=owner.id,
+        session_id=ls.id,
+        kind="tutor_turn",
+        status="running",
+        deadline_seconds=180,
+    )
+    db.add(test_job)
+    db.commit()
+
     orch = AgentOrchestrator(db)
-    scene = SceneGraph(board_revision=1, objects=[], connectors=[], groups=[])
+    scene = SceneGraph(board_revision=1, objects=[])
 
     res = orch._execute_live_turn(
         session=ls,
-        job_id="test-live-job-1",
+        job_id=test_job.id,
         selection=None,
         anchors=[anchor],
         current_scene=scene,

@@ -3,6 +3,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from claimlab.api import app
+from claimlab.config import settings
 from claimlab.database import Base, engine
 from claimlab.contracts.whiteboard import (
     BoardObject,
@@ -19,7 +20,8 @@ from claimlab.whiteboard.engine import apply_atomic_patch, WhiteboardValidationE
 
 
 @pytest.fixture(autouse=True)
-def setup_db():
+def setup_db(monkeypatch):
+    monkeypatch.setattr(settings, "MODEL_MODE", "fixture")
     Base.metadata.create_all(bind=engine)
     yield
 
