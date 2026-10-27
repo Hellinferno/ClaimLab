@@ -251,7 +251,9 @@ def evaluate_task_submission(
 
     elif task.expected_type == "text_choice":
         expected = str(task.expected_answer_raw).lower()
-        if expected in ans_str or any(word in ans_str for word in expected.split()):
+        content_words = [w for w in expected.split() if w not in ("and", "or", "the", "a", "in", "to", "of", "with")]
+        is_match = (expected in ans_str) or (content_words and all(w in ans_str for w in content_words))
+        if is_match:
             next_t = (task.task_id, task.follow_up_variant) if task.follow_up_variant else None
             return RubricEvaluation(
                 is_correct=True,

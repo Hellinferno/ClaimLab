@@ -27,7 +27,7 @@
 
 [![Meta AI](https://img.shields.io/badge/META%20AI-Developer%20Hackathon-7928CA?style=for-the-badge&logo=meta&logoColor=white)](https://meta.com)
 [![Model](https://img.shields.io/badge/NEURAL%20BACKBONE-muse--spark--1.3-00DFD8?style=for-the-badge&logo=meta&logoColor=black)](#-neural-orchestration-meta-muse-spark-13)
-[![Test Matrix](https://img.shields.io/badge/SYSTEM%20TESTS-24%2F24%20PASSED-00F59B?style=for-the-badge&logo=pytest&logoColor=black)](#-system-telemetry--test-verification)
+[![Test Matrix](https://img.shields.io/badge/SYSTEM%20TESTS-25%2F25%20PASSED-00F59B?style=for-the-badge&logo=pytest&logoColor=black)](#-system-telemetry--test-verification)
 [![Client](https://img.shields.io/badge/CLIENT-React%2019%20%7C%20TypeScript%205-61DAFB?style=for-the-badge&logo=react&logoColor=black)](#-client-architecture)
 [![Kernel](https://img.shields.io/badge/NUMERICAL%20KERNEL-Python%203.12%20%7C%20FastAPI-FF007A?style=for-the-badge&logo=python&logoColor=white)](#-backend-engine)
 [![License](https://img.shields.io/badge/LICENSE-MIT-7928CA?style=for-the-badge)](LICENSE)
@@ -288,9 +288,10 @@ BUDGET_RESERVATION_TOKENS=4096
 | Document Boundaries | `T-PDF-02..03` | **PASSED** | Non-PDF, oversize (>10MiB), and 3-document quota rejection |
 | Revision Conflict | `T-STATE-01` | **PASSED** | Optimistic concurrency rejects stale revision numbers with 409 |
 | Page Range Limits | `T-SRC-02` | **PASSED** | Inverted and out-of-bounds selection ranges rejected with 422 |
+| Evaluation Benchmark | `EVAL-HARNESS` | **PASSED** | All 12 behavioral cases from `docs/12_EVALUATION_HARNESS.md` verified (100%) |
 
 ```bash
-======================== 24 passed, 1 warning in 6.98s ========================
+======================== 25 passed, 1 warning in 4.36s ========================
 ```
 
 ---
