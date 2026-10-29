@@ -26,10 +26,10 @@
 ---
 
 [![Meta AI](https://img.shields.io/badge/META%20AI-Developer%20Hackathon-7928CA?style=for-the-badge&logo=meta&logoColor=white)](https://meta.com)
-[![Model](https://img.shields.io/badge/NEURAL%20BACKBONE-muse--spark--1.3-00DFD8?style=for-the-badge&logo=meta&logoColor=black)](#-neural-orchestration-meta-muse-spark-13)
+[![Model](https://img.shields.io/badge/NEURAL%20BACKBONE-muse--spark--1.3-00DFD8?style=for-the-badge&logo=meta&logoColor=black)](#-neural-orchestration--meta-muse-spark-13)
 [![Test Matrix](https://img.shields.io/badge/SYSTEM%20TESTS-66%20OFFLINE%20%2B%202%20LIVE%20PASSED-00F59B?style=for-the-badge&logo=pytest&logoColor=black)](#-system-telemetry--test-verification)
-[![Client](https://img.shields.io/badge/CLIENT-React%2019%20%7C%20TypeScript%206-61DAFB?style=for-the-badge&logo=react&logoColor=black)](#-client-architecture)
-[![Kernel](https://img.shields.io/badge/NUMERICAL%20KERNEL-Python%203.12%20%7C%20FastAPI-FF007A?style=for-the-badge&logo=python&logoColor=white)](#-backend-engine)
+[![Client](https://img.shields.io/badge/CLIENT-React%2019%20%7C%20TypeScript%206-61DAFB?style=for-the-badge&logo=react&logoColor=black)](#-repository-architecture)
+[![Kernel](https://img.shields.io/badge/NUMERICAL%20KERNEL-Python%203.12%20%7C%20FastAPI-FF007A?style=for-the-badge&logo=python&logoColor=white)](#-repository-architecture)
 [![License](https://img.shields.io/badge/LICENSE-MIT-7928CA?style=for-the-badge)](LICENSE)
 
 <br/>
