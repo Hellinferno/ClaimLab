@@ -1,0 +1,41 @@
+--- a/backend/src/claimlab/api.py
++++ b/backend/src/claimlab/api.py
+@@ -63,6 +63,10 @@
+     Job,
+     JobEvent,
+     IdempotencyRecord,
++    TaskAttempt,
++    TeachingDecision,
++    ToolInvocation,
++    BudgetReservation,
+ )
+ from claimlab.numerics.runner import runner, serialize_run_evidence
+ from claimlab.security import (
+@@ -307,6 +311,27 @@
+         except Exception:
+             pass
+ 
++    # Proposed only: purge private records when the authenticated owner invokes
++    # the existing confirmed Delete my data action. Retain the revoked owner.
++    db.flush()
++    session_ids = [s.id for s in sessions]
++    document_ids = [doc.id for doc in docs]
++    job_ids = [row[0] for row in db.query(Job.id).filter(Job.owner_id == guest.id).all()]
++    for model in (ToolInvocation, JobEvent):
++        db.query(model).filter(model.job_id.in_(job_ids)).delete(synchronize_session=False)
++    for model in (TaskAttempt, TeachingDecision, ConceptEvidence, BoardSnapshot):
++        db.query(model).filter(model.session_id.in_(session_ids)).delete(synchronize_session=False)
++    db.query(LearnerEvent).filter(LearnerEvent.owner_id == guest.id).delete(synchronize_session=False)
++    db.query(ExperimentRun).filter(ExperimentRun.owner_id == guest.id).delete(synchronize_session=False)
++    db.query(BudgetReservation).filter(BudgetReservation.owner_id == guest.id).delete(synchronize_session=False)
++    db.query(Job).filter(Job.owner_id == guest.id).delete(synchronize_session=False)
++    db.query(LearningSession).filter(LearningSession.owner_id == guest.id).delete(synchronize_session=False)
++    db.query(SourceSelection).filter(SourceSelection.owner_id == guest.id).delete(synchronize_session=False)
++    for model in (DBSourceAnchor, DocumentPage):
++        db.query(model).filter(model.document_id.in_(document_ids)).delete(synchronize_session=False)
++    db.query(DBDocument).filter(DBDocument.owner_id == guest.id).delete(synchronize_session=False)
++    db.query(IdempotencyRecord).filter(IdempotencyRecord.owner_id == guest.id).delete(synchronize_session=False)
++
+     db.commit()
+ 
+     res_data = {"deletion_id": str(uuid.uuid4()), "status": "deleted"}
