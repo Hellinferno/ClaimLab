@@ -4,6 +4,7 @@ from pydantic import Field
 import uuid
 from claimlab.contracts.common import StrictModel, EvidenceCategory
 from claimlab.contracts.whiteboard import SceneGraph
+from claimlab.contracts.document import SourceSelectionResponse
 
 
 class CreateSessionRequest(StrictModel):
@@ -41,3 +42,5 @@ class SessionStateResponse(StrictModel):
     evidence_summary: Dict[str, EvidenceCategory] = Field(default_factory=dict)
     active_task: Optional[Dict[str, Any]] = None
     latest_run_id: Optional[str] = None
+    source_selection: Optional[SourceSelectionResponse] = None
+    tutor_narration: Optional[str] = None

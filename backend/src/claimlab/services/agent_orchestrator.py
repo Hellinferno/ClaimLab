@@ -2,6 +2,7 @@
 import hashlib
 import json
 import logging
+import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 import httpx
@@ -18,7 +19,7 @@ from claimlab.contracts.whiteboard import (
     BoardPatch,
     AddObjectCommand,
 )
-from claimlab.contracts.experiment import RecipeId
+from claimlab.contracts.experiment import ExperimentRunResponse, RecipeId
 from claimlab.models import (
     LearningSession,
     BoardSnapshot,
@@ -27,13 +28,15 @@ from claimlab.models import (
     ExperimentRun,
     SourceAnchor,
     SourceSelection,
+    Job,
     JobEvent,
     ToolInvocation,
     BudgetReservation,
 )
-from claimlab.numerics.runner import runner
+from claimlab.numerics.runner import runner, serialize_run_evidence
 from claimlab.whiteboard.engine import apply_atomic_patch
 from claimlab.learning.adaptation import update_evidence_and_decide
+from claimlab.learning.task_bank import TASK_REGISTRY
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +91,19 @@ TOOLS_SPEC = [
                 "type": "object",
                 "properties": {
                     "narration": {"type": "string"},
-                    "board_commands": {"type": "array", "items": {"type": "object"}},
+                    "board_commands": {
+                        "type": "array",
+                        "description": "Short whiteboard notes added beside the reviewed diagram",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "action": {"type": "string", "enum": ["add_text"]},
+                                "label": {"type": "string", "description": "Note title, a few words"},
+                                "text": {"type": "string", "description": "One short sentence"},
+                            },
+                            "required": ["action", "label"],
+                        },
+                    },
                     "active_task": {"type": "object"},
                 },
                 "required": ["narration"],
@@ -96,6 +111,116 @@ TOOLS_SPEC = [
         },
     },
 ]
+
+
+ANSWER_EVENTS = ("prediction_submitted", "explanation_submitted", "connection_submitted")
+
+DEFAULT_TASK = {
+    "task_id": "attention-scale-apply-01",
+    "task_variant": "v1-a",
+    "question": "A score is 12 and key dimension is 16. What is the scaled score (12 / sqrt(16))?",
+    "expected_type": "number",
+}
+
+
+RECIPE_PARAM_ALIASES = {
+    "attention_scaling_v1": {
+        "dimension": "dimensions", "d_k": "dimensions", "d_k_values": "dimensions",
+        "keys": "n_keys", "num_samples": "trials", "samples": "trials",
+    },
+    "softmax_sensitivity_v1": {"scores": "logits", "scale": "multiplier", "temperature": "multiplier"},
+}
+
+BOARD_OPS = ("add_object", "update_object", "add_connector", "highlight_objects", "remove_object", "set_active_group", "clear_highlights")
+TEXT_BOARD_ACTIONS = ("add_text", "add_object", "add_note", "write")
+
+
+class ProviderUnavailableError(RuntimeError):
+    """A live teaching turn failed; fixture substitution is never implicit."""
+
+
+def normalize_recipe_parameters(recipe_id: Optional[str], params: Dict[str, Any]) -> Dict[str, Any]:
+    """Map common model spellings onto a recipe's schema and fill reviewed defaults.
+
+    Alias keys are removed, since strict validation rejects any extra field.
+    """
+    params = dict(params)
+    for alias, field in RECIPE_PARAM_ALIASES.get(recipe_id, {}).items():
+        if alias in params:
+            value = params.pop(alias)
+            if alias == "temperature" and isinstance(value, (int, float)) and value > 0:
+                value = 1 / value  # softmax(s / T) multiplies scores by 1/T
+            params.setdefault(field, value)
+    if recipe_id == "attention_scaling_v1":
+        dimensions = params.get("dimensions", 64)
+        params["dimensions"] = [dimensions] if isinstance(dimensions, int) else list(dimensions)
+        params.setdefault("n_keys", 4)
+        params["trials"] = min(200, max(20, params.get("trials", 100)))
+    elif recipe_id == "softmax_sensitivity_v1":
+        params.setdefault("logits", [2.0, 1.0, 0.1])
+        params.setdefault("multiplier", 2.0)
+    elif recipe_id == "causal_masking_v1":
+        params.setdefault("scores", [[1.0, 2.0, 0.5], [0.5, 1.5, 2.0], [1.2, 0.8, 1.0]])
+    return params
+
+
+def normalize_board_command(cmd: Any, note_index: int) -> Optional[Dict[str, Any]]:
+    """Accept a board patch command, turning a simple text-style action into a valid text note.
+
+    Models often send {"action": "write", "label": ..., "text": ...}. Notes are laid
+    out in two columns below the reviewed diagram; the patch engine still
+    validates every command before it reaches the board.
+    """
+    if not isinstance(cmd, dict):
+        return None
+    if "op" not in cmd and cmd.get("action") in TEXT_BOARD_ACTIONS:
+        if "object" in cmd:
+            cmd = {**cmd, "op": "add_object"}
+        else:
+            text = str(cmd.get("text") or cmd.get("content") or "").strip()
+            label = str(cmd.get("label") or text or "Concept note").strip()
+            cmd = {"op": "add_object", "object": {
+                "id": f"note-{uuid.uuid4().hex[:8]}",
+                "type": ObjectType.TEXT.value,
+                "label": label[:120],
+                "position": {"x": 50.0 + 370.0 * (note_index % 2), "y": 350.0 + 95.0 * (note_index // 2)},
+                "dimensions": {"width": 350.0, "height": 80.0},
+                "payload": {"text": text[:300]} if text and text != label else {},
+            }}
+    return cmd if cmd.get("op") in BOARD_OPS else None
+
+
+def latest_tutor_step(db: Session, session_id: str) -> Dict[str, Any]:
+    """Payload of the session's latest completed tutor turn: its narration and active task."""
+    step = (
+        db.query(JobEvent)
+        .join(Job, Job.id == JobEvent.job_id)
+        .filter(Job.session_id == session_id, JobEvent.event_type == "tutor_turn_completed")
+        .order_by(JobEvent.created_at.desc(), JobEvent.id.desc())
+        .first()
+    )
+    return json.loads(step.payload_json) if step else {}
+
+
+def experiment_run_record(
+    run: ExperimentRunResponse, owner_id: str, session_id: str, parent_job_id: str,
+) -> ExperimentRun:
+    """Retained run row built from the runner's canonical result."""
+    return ExperimentRun(
+        id=run.run_id,
+        owner_id=owner_id,
+        session_id=session_id,
+        parent_job_id=parent_job_id,
+        recipe_id=run.recipe_id.value,
+        parameters_json=json.dumps(run.parameters),
+        parameter_hash=run.parameter_hash,
+        seed=run.seed,
+        status=run.status,
+        output_json=json.dumps(run.output),
+        checks_json=serialize_run_evidence(run),
+        started_at=datetime.fromisoformat(run.started_at),
+        completed_at=datetime.fromisoformat(run.completed_at) if run.completed_at else None,
+    )
 
 
 class AgentOrchestrator:
@@ -116,7 +241,10 @@ class AgentOrchestrator:
             raise ValueError(f"Session {session_id} not found")
 
         selection = self.db.query(SourceSelection).filter(SourceSelection.id == learning_session.selection_id).first()
-        anchors = self.db.query(SourceAnchor).filter(SourceAnchor.document_id == selection.document_id).all() if selection else []
+        anchors = self.db.query(SourceAnchor).filter(
+            SourceAnchor.document_id == selection.document_id,
+            SourceAnchor.page_number.between(selection.page_start, selection.page_end),
+        ).order_by(SourceAnchor.page_number, SourceAnchor.start_offset).all() if selection else []
 
         latest_snapshot = (
             self.db.query(BoardSnapshot)
@@ -146,7 +274,9 @@ class AgentOrchestrator:
         )
 
         # Decide whether to execute live Meta API or deterministic fixture
-        if settings.MODEL_MODE == "live" and settings.META_API_KEY:
+        if settings.MODEL_MODE == "live":
+            if not settings.META_API_KEY:
+                raise ProviderUnavailableError("Live tutor is not configured. Your saved work is available.")
             return self._execute_live_turn(learning_session, job_id, selection, anchors, current_scene, recent_events, evidence_list)
         else:
             return self._execute_fixture_turn(learning_session, job_id, selection, anchors, current_scene, recent_events, evidence_list, trigger_event_id)
@@ -172,12 +302,7 @@ class AgentOrchestrator:
         updated_scene = current_scene
 
         # Check if responding to student event
-        if last_event and last_event.event_type in (
-            "prediction_submitted",
-            "explanation_submitted",
-            "message_submitted",
-            "connection_submitted",
-        ):
+        if last_event and last_event.event_type in ANSWER_EVENTS:
             payload = json.loads(last_event.payload_json)
             answer = payload.get("answer", payload.get("edges", ""))
             task_id = payload.get("task_id", "attention-scale-apply-01")
@@ -190,7 +315,6 @@ class AgentOrchestrator:
                 task_id,
                 task_variant,
                 answer,
-                hints_used=0,
             )
             active_task = next_t
 
@@ -201,14 +325,13 @@ class AgentOrchestrator:
                 )
             elif ev.category == EvidenceCategory.SUPPORTED_WITH_HELP.value:
                 narration = (
-                    "Exactly right! Dividing the score by $\\sqrt{d_k} = \\sqrt{16} = 4$ yields $12 / 4 = 3$. "
-                    "Let's test this understanding on a second distinct variant."
+                    "Your answer matches the task's checked rubric. "
+                    "Let's test this understanding on a different application."
                 )
             else:
-                narration = (
-                    "Let's trace the arithmetic: Key dimension $d_k = 16$, so $\\sqrt{d_k} = 4$. "
-                    "Dividing the unscaled dot product $12$ by $4$ gives $3$. Try recalculating this step."
-                )
+                task_def = TASK_REGISTRY.get((task_id, task_variant))
+                hint = task_def.hint if task_def else "Check the current task's quantities and try again."
+                narration = f"[Background] Let's inspect this step together. {hint}"
 
             # Advance board revision
             updated_scene = SceneGraph(
@@ -221,7 +344,7 @@ class AgentOrchestrator:
         elif not current_scene.objects:
             # Initial Turn: Run attention scaling recipe and populate board via atomic patch
             narration = (
-                "[Source] Based on Section B of the Attention Lab, dot-product attention scores are scaled by "
+                "[Background] This fixture lesson illustrates attention scaling. Dot-product attention scores are scaled by "
                 "$\\frac{1}{\\sqrt{d_k}}$ to prevent extreme growth with large vector dimensions.\n"
                 "[Experiment] Below, the whiteboard charts simulated score variances across dimensions 8, 32, and 128. "
                 "Notice that unscaled variance increases linearly with $d_k$, while scaled variance remains stable near 1.0."
@@ -235,24 +358,7 @@ class AgentOrchestrator:
                 "seed": 42,
             })
             new_run_id = run_res.run_id
-
-            # Save ExperimentRun in DB
-            db_run = ExperimentRun(
-                id=run_res.run_id,
-                owner_id=session.owner_id,
-                session_id=session.id,
-                parent_job_id=job_id,
-                recipe_id=run_res.recipe_id.value,
-                parameters_json=json.dumps(run_res.parameters),
-                parameter_hash=run_res.parameter_hash,
-                seed=run_res.seed,
-                status=run_res.status,
-                output_json=json.dumps(run_res.output),
-                checks_json=json.dumps([c.model_dump() for c in run_res.checks]),
-                started_at=datetime.fromisoformat(run_res.started_at),
-                completed_at=datetime.fromisoformat(run_res.completed_at) if run_res.completed_at else None,
-            )
-            self.db.add(db_run)
+            self.db.add(experiment_run_record(run_res, session.owner_id, session.id, job_id))
 
             # Build whiteboard objects through atomic patch engine
             initial_objects = [
@@ -317,12 +423,7 @@ class AgentOrchestrator:
             )
             updated_scene = apply_atomic_patch(current_scene, patch)
 
-            active_task = {
-                "task_id": "attention-scale-apply-01",
-                "task_variant": "v1-a",
-                "question": "A score is 12 and key dimension is 16. What is the scaled score (12 / sqrt(16))?",
-                "expected_type": "number",
-            }
+            active_task = dict(DEFAULT_TASK)
 
             ev_init = ConceptEvidence(
                 session_id=session.id,
@@ -336,7 +437,17 @@ class AgentOrchestrator:
             self.db.commit()
 
         else:
-            narration = "I am ready for your next question or experiment. You can adjust the parameters on the right or try a new query."
+            # Asking for help is context, not a failed numerical assessment.
+            active_task = latest_tutor_step(self.db, session.id).get("active_task")
+            if last_event and last_event.event_type == "hint_requested" and active_task:
+                task_def = TASK_REGISTRY.get((active_task.get("task_id"), active_task.get("task_variant")))
+                narration = f"[Background] Try this strategy: {task_def.hint}" if task_def else "[Background] Break the current task into one calculation at a time."
+            else:
+                narration = (
+                    "[Background] Fixture mode offers a fixed explanation rather than a live answer to your question. "
+                    "Queries and keys produce scores; dividing by the square root of key dimension controls their scale. "
+                    "Softmax turns scores into weights, which combine the values. Your current task is still available."
+                )
             updated_scene = SceneGraph(
                 schema_version=current_scene.schema_version,
                 board_revision=next_revision,
@@ -432,39 +543,19 @@ class AgentOrchestrator:
         self.db.add(budget)
         self.db.commit()
 
-        # Handle learner evidence and learning adaptation if responding to student
-        active_task = None
-        if recent_events and recent_events[0].event_type in (
-            "prediction_submitted",
-            "explanation_submitted",
-            "message_submitted",
-            "connection_submitted",
-        ):
-            last_event = recent_events[0]
-            try:
-                payload = json.loads(last_event.payload_json)
-                answer = payload.get("answer", payload.get("edges", ""))
-                task_id = payload.get("task_id", "attention-scale-apply-01")
-                task_variant = payload.get("task_variant", "v1-a")
-
-                ev, dec, next_t = update_evidence_and_decide(
-                    self.db,
-                    session.id,
-                    last_event,
-                    task_id,
-                    task_variant,
-                    answer,
-                    hints_used=0,
-                )
-                if next_t:
-                    active_task = next_t
-            except Exception as e:
-                logger.warning(f"Error updating learner evidence: {e}")
+        last_event = recent_events[0] if recent_events else None
+        requested_hint = bool(last_event and last_event.event_type == "hint_requested")
+        answered = bool(last_event and last_event.event_type in ANSWER_EVENTS)
+        previous_task = latest_tutor_step(self.db, session.id).get("active_task")
+        model_task = None
+        if requested_hint:
+            messages[0]["content"] += " The learner requested a hint: offer one scaffold without revealing the full answer, and keep the current task active."
 
         max_iterations = 4
         iterations = 0
         final_narration = ""
         new_run_id = None
+        scaling_run_id = None
         next_revision = session.revision + 1
         updated_scene = current_scene.model_copy(deep=True)
         updated_scene.board_revision = next_revision
@@ -478,7 +569,9 @@ class AgentOrchestrator:
                         "messages": messages,
                         "tools": TOOLS_SPEC,
                         "tool_choice": "auto",
-                        "max_tokens": 1500,
+                        # Reasoning tokens count against this limit; 1500 truncated
+                        # replies to empty content without a tool call.
+                        "max_tokens": 4096,
                     }
                     resp = client.post(
                         f"{settings.META_BASE_URL.rstrip('/')}/chat/completions",
@@ -488,17 +581,22 @@ class AgentOrchestrator:
                     resp.raise_for_status()
                     data = resp.json()
                 except Exception as e:
-                    logger.error(f"Live Meta API request failed: {e}")
-                    # Fallback cleanly to fixture turn on provider network/credential error
-                    return self._execute_fixture_turn(session, job_id, selection, anchors, current_scene, recent_events, evidence_list, None)
+                    logger.error("Live Meta API request failed (%s)", type(e).__name__)
+                    budget.status = "released"
+                    self.db.commit()
+                    raise ProviderUnavailableError(
+                        "The live tutor is unavailable. Your saved lesson is available; try again."
+                    ) from e
 
                 choice = data["choices"][0]
                 message = choice["message"]
                 messages.append(message)
 
-                tool_calls = message.get("tool_calls", [])
+                tool_calls = message.get("tool_calls") or []
                 if not tool_calls:
-                    final_narration = message.get("content", "")
+                    final_narration = message.get("content") or final_narration
+                    if not final_narration:
+                        logger.warning("Live tutor reply had no narration (finish_reason=%s)", choice.get("finish_reason"))
                     break
 
                 for tc in tool_calls:
@@ -526,32 +624,12 @@ class AgentOrchestrator:
 
                     elif fn_name == "run_experiment":
                         rec_id = fn_args.get("recipe_id")
-                        params = fn_args.get("parameters", {})
-                        # Parameter normalizations for LLMs
-                        if rec_id == "attention_scaling_v1":
-                            if "dimensions" not in params:
-                                d = params.get("dimension", params.get("d_k", 64))
-                                params["dimensions"] = [d] if isinstance(d, int) else list(d)
-                            if "n_keys" not in params:
-                                params["n_keys"] = params.get("keys", 4)
-                            if "trials" not in params:
-                                params["trials"] = min(200, max(20, params.get("num_samples", params.get("samples", 100))))
-                        elif rec_id == "softmax_sensitivity_v1":
-                            if "logits" not in params:
-                                params["logits"] = params.get("scores", [2.0, 1.0, 0.1])
-                            if "multiplier" not in params:
-                                params["multiplier"] = params.get("scale", params.get("temperature", 2.0))
-                        elif rec_id == "causal_masking_v1":
-                            if "scores" not in params:
-                                params["scores"] = [
-                                    [1.0, 2.0, 0.5],
-                                    [0.5, 1.5, 2.0],
-                                    [1.2, 0.8, 1.0]
-                                ]
-
                         try:
-                            run_res = runner.run(rec_id, params)
+                            run_res = runner.run(rec_id, normalize_recipe_parameters(rec_id, fn_args.get("parameters") or {}))
                             new_run_id = run_res.run_id
+                            if run_res.recipe_id == RecipeId.ATTENTION_SCALING:
+                                scaling_run_id = run_res.run_id
+                            self.db.add(experiment_run_record(run_res, session.owner_id, session.id, job_id))
                             tool_result = {
                                 "run_id": run_res.run_id,
                                 "status": run_res.status,
@@ -562,27 +640,21 @@ class AgentOrchestrator:
 
                     elif fn_name == "present_teaching_step":
                         final_narration = fn_args.get("narration", "")
-                        active_task = fn_args.get("active_task")
-                        board_cmds = fn_args.get("board_commands", [])
+                        model_task = fn_args.get("active_task")
+                        board_cmds = fn_args.get("board_commands") or []
                         if board_cmds:
+                            notes = sum(1 for o in updated_scene.objects if o.type == ObjectType.TEXT)
                             valid_cmds = []
                             for cmd in board_cmds:
-                                if isinstance(cmd, dict):
-                                    if "action" in cmd and "op" not in cmd:
-                                        if cmd["action"] in ("add_text", "add_object"):
-                                            cmd["op"] = "add_object"
-                                            if "object" not in cmd:
-                                                cmd["object"] = {
-                                                    "id": f"obj_{len(updated_scene.objects) + 1}",
-                                                    "type": "concept_card",
-                                                    "label": cmd.get("text", "Concept Note"),
-                                                    "position": {"x": 50.0, "y": 50.0},
-                                                }
-                                    if "op" in cmd and cmd["op"] in (
-                                        "add_object", "update_object", "add_connector",
-                                        "highlight_objects", "remove_object", "set_active_group", "clear_highlights"
-                                    ):
-                                        valid_cmds.append(cmd)
+                                normalized = normalize_board_command(cmd, notes + len(valid_cmds))
+                                if normalized:
+                                    valid_cmds.append(normalized)
+                                else:
+                                    logger.warning(
+                                        "Ignored model board command (action=%s, keys=%s)",
+                                        cmd.get("action") if isinstance(cmd, dict) else None,
+                                        sorted(cmd) if isinstance(cmd, dict) else type(cmd).__name__,
+                                    )
                             if valid_cmds:
                                 try:
                                     patch = BoardPatch(
@@ -609,6 +681,24 @@ class AgentOrchestrator:
         budget.settled_amount_usd = 0.005
         self.db.commit()
 
+        graded_task = None
+        if answered:
+            # Grade only after the provider turn succeeded: a failed turn leaves no
+            # attempt behind, so the learner's retry is assessed exactly once.
+            try:
+                payload = json.loads(last_event.payload_json)
+                _, _, graded_task = update_evidence_and_decide(
+                    self.db,
+                    session.id,
+                    last_event,
+                    payload.get("task_id", "attention-scale-apply-01"),
+                    payload.get("task_variant", "v1-a"),
+                    payload.get("answer", payload.get("edges", "")),
+                )
+            except Exception as e:
+                logger.warning(f"Error updating learner evidence: {e}")
+                graded_task = previous_task
+
         # Ensure initial concept evidence exists
         ev_exists = self.db.query(ConceptEvidence).filter(
             ConceptEvidence.session_id == session.id,
@@ -626,27 +716,17 @@ class AgentOrchestrator:
             self.db.add(ev_init)
             self.db.commit()
 
-        # Ensure active experiment run exists for grounding
-        if not new_run_id and (session.revision <= 1 or not updated_scene.objects):
+        # The seeded diagram's scaling plot needs a retained scaling run, whatever
+        # recipe the model chose; the first turn always grounds on a run.
+        seed_board = sum(1 for o in updated_scene.objects if o.type != ObjectType.TEXT) < 4
+        if (seed_board and not scaling_run_id) or (not new_run_id and (session.revision <= 1 or not updated_scene.objects)):
             init_exp = runner.run("attention_scaling_v1", {"dimensions": [16, 32, 64, 128], "n_keys": 4, "trials": 50, "seed": 42})
-            new_run_id = init_exp.run_id
-            db_run = ExperimentRun(
-                id=init_exp.run_id,
-                owner_id=session.owner_id,
-                session_id=session.id,
-                recipe_id="attention_scaling_v1",
-                parameter_hash=init_exp.parameter_hash,
-                parameters_json=json.dumps({"dimensions": [16, 32, 64, 128], "n_keys": 4, "trials": 50, "seed": 42}),
-                seed=42,
-                status="succeeded",
-                output_json=json.dumps(init_exp.output),
-                checks_json=json.dumps([c.model_dump() for c in init_exp.checks]),
-            )
-            self.db.add(db_run)
+            new_run_id = scaling_run_id = init_exp.run_id
+            self.db.add(experiment_run_record(init_exp, session.owner_id, session.id, job_id))
             self.db.commit()
 
-        # Seed initial whiteboard objects if model provided text-only narration
-        if len(updated_scene.objects) < 4:
+        # Seed the reviewed diagram when the model's notes left the board without one
+        if seed_board:
             initial_objects = [
                 BoardObject(
                     id="node-q",
@@ -692,7 +772,7 @@ class AgentOrchestrator:
                     label="Variance vs Key Dimension",
                     concept_id="attention_scaling",
                     payload={
-                        "run_id": new_run_id,
+                        "run_id": scaling_run_id,
                         "field": "results",
                         "title": "Score Variance: Scaled vs Unscaled",
                         "x_label": "Key Dimension (d_k)",
@@ -700,20 +780,23 @@ class AgentOrchestrator:
                     },
                 ),
             ]
+            existing_ids = {o.id for o in updated_scene.objects}
             patch = BoardPatch(
                 schema_version=1,
                 base_board_revision=updated_scene.board_revision,
-                commands=[AddObjectCommand(object=obj) for obj in initial_objects],
+                commands=[AddObjectCommand(object=obj) for obj in initial_objects if obj.id not in existing_ids],
             )
             updated_scene = apply_atomic_patch(updated_scene, patch)
 
-        if not active_task:
-            active_task = {
-                "task_id": "attention-scale-apply-01",
-                "task_variant": "v1-a",
-                "question": "A score is 12 and key dimension is 16. What is the scaled score (12 / sqrt(16))?",
-                "expected_type": "number",
-            }
+        if requested_hint:
+            active_task = previous_task
+        elif answered:
+            # Reviewed task-bank progression decides what follows an answer; none
+            # remains once the sequence is complete, as in fixture turns.
+            active_task = graded_task or model_task
+        else:
+            # Questions and other help keep the learner's current task.
+            active_task = model_task or previous_task or dict(DEFAULT_TASK)
 
         if not final_narration:
             final_narration = "Let us examine how scaling dot products stabilizes variance across dimensions."

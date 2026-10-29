@@ -26,9 +26,11 @@ The source selection establishes which concepts are relevant. A generic list of 
 
 Use categorical summaries from the data model. A concept begins `not_assessed`; exposure can mark it `introduced`. A task attempt can yield `needs_check`, `supported_with_help`, or `supported_independently` depending on the actual evidence. A later contradiction can mark `needs_revisit` while preserving earlier attempts.
 
-A single correct answer does not certify lasting mastery. The initial progression policy requires two distinct application variants with at least one independently completed before labelling the available evidence `supported_independently`. State descriptions remain about this session's evidence, not a validated educational measurement scale.
+A single correct answer does not certify lasting mastery. The progression policy requires two distinct independently completed application variants before labelling the available evidence `supported_independently`. Assisted correct answers remain useful evidence but do not count toward that independent-variant threshold. State descriptions remain about this session's evidence, not a validated educational measurement scale.
 
 Hints, displayed worked answers, repeated variants, and explicitly requested solutions are recorded. A client cannot self-report zero hints after the server served them.
+
+As implemented on 28 October 2026, the server attaches the current task/variant identity to help events. A hint, a tutor question that receives assistance, or feedback after an incorrect attempt makes a subsequent answer to that same variant assisted. Help on one variant does not automatically taint a fresh variant. The strategy control records `hint_requested` before showing help; failed help requests do not reveal an unrecorded strategy. This conservative policy prevents an exposed answer from being presented as independent understanding.
 
 ## Decision policy
 

@@ -1,6 +1,6 @@
 # Status and Handoff
 
-**Prepared:** 27 October 2026 IST · **Stage:** Documentation complete; application implementation not established by this pack
+**Updated:** 29 October 2026 IST · **Stage:** Local implementation, offline browser flows, and a live-model local browser review verified; deployment/release completion not established
 
 ## Completed in this deliverable
 
@@ -16,12 +16,12 @@
 | --- | --- |
 | Application repository and code | Implemented (FastAPI backend + React/TypeScript frontend + contracts) |
 | Exact dependency locks | Resolved and locked (`backend/requirements.txt`, `backend/requirements.lock`, `frontend/package.json`) |
-| Meta account/model access | Verified live (`muse-spark-1.3`, `T-META-01` & `T-META-02` passed with function calling) |
-| Runner runtime | Implemented with all 3 reviewed numerical recipes (`softmax_sensitivity_v1`, `attention_scaling_v1`, `causal_masking_v1`) |
-| Application tests | 27/27 tests passing (`test_numerics.py`, `test_api.py`, `test_complete_spec.py`, `test_evaluation_harness.py`, `test_live_meta.py`) |
-| Behavioral Evaluation Benchmark | 12/12 cases passed (100%) in `backend/src/claimlab/evaluation/benchmark.py` |
-| Frontend compilation | Production bundle built cleanly (`frontend/dist`, 22 modules, 0 TS errors) |
-| Linter | Ruff clean (0 errors) |
+| Meta account/model access | 29 October: T-META-01/02 rerun and passed against `muse-spark-1.3`; a local live-mode browser lesson (start, answer, question, reload, delete) completed. Missing/failed live access returns 503 without fixtures |
+| Runner runtime | All three reviewed recipes implemented and checked locally; isolated container execution not verified in this work |
+| Application tests | 29 October: 66 offline tests passed, 2 live tests passed, 9/9 Chrome flows passed. See the dated entry |
+| Behavioral Evaluation Benchmark | 12/12 fixture cases included in the offline suite. Owner DB erasure is covered separately by `test_delete_erases_all_owner_content_and_preserves_another_owner`. Live benchmark was not rerun |
+| Frontend compilation | TypeScript + production Vite build pass; KaTeX deferred until mathematics is shown |
+| Linter | Backend Ruff and frontend Oxlint pass |
 | Public repository/submission | Pushed to GitHub `https://github.com/Hellinferno/ClaimLab.git` on branch `main` |
 
 ---
@@ -152,7 +152,7 @@
 
 ## Next dependency-ready step
 
-Deploy or host single-instance preview, finalize video recording / walkthrough script, and generate the final Hackathon submission kit.
+M5 remains open. Resolve complete owner erasure (approval pending for the prepared patch), verify isolated parser/recipe execution and durable job/cancellation behavior, then rerun a real supported Meta journey before claiming release readiness. A local fixture browser preview is development evidence; it is not a deployed/live-model demonstration.
 
 ## Handoff format for future sessions
 
@@ -171,3 +171,74 @@ Keep secrets, raw student documents, and private account information out of this
 ## Default behavior when a new coding tool takes over
 
 Read the actual repository and this status first. Preserve implemented working behavior. Do not restart the project merely because another tool authored it. Resolve a genuine specification conflict in the decision log and update affected contracts together.
+
+---
+
+## Progress Entry: 28 October 2026 — UI, headed-browser verification, and consequential regressions
+
+**Repository/environment:** working tree on `main`, base commit `5aead92`; Windows/PowerShell, Python 3.12 virtual environment, Node 24, installed Google Chrome. No new commit, push, deployment, or submission. User's pre-existing Vite API port 8080 was preserved.
+
+**Milestone:** M5 usability and regression work, preserving the detailed concept and all three product parts. Rebuilt the source/whiteboard/lab workspace; added explicit example start and actual PDF question/page selection; fixed source/narration/session restoration, stale results, chart geometry, equation clipping, keyboard inspection, provider-failure reporting, idempotent retries, task identity, and retained execution metadata. PDF parsing no longer blocks the async request loop. KaTeX now loads only when mathematics appears, reducing initial JavaScript by about 49% (529.57 → 272.51 kB in the production build).
+
+**Learning evidence:** delivered hints/questions and incorrect-answer feedback are now retained as assistance for the same task/variant. Only two distinct correct unassisted variants qualify as independent evidence. Fresh variants remain eligible; pre-fix historical evidence is not retroactively relabelled. The strategy control records a hint event before revealing help, and failed tutor requests preserve drafts.
+
+**Checks:** backend `pytest backend/tests -m "not live_meta" -q`: **52 passed, 2 deselected**; backend Ruff: passed. Frontend `npm run build`, `npm run lint`: passed. `npm --prefix frontend run test:e2e:headed`: **9/9 Chrome flows passed** including all three actual numerical recipes, exact run/plot binding, keyboard answers, assisted-credit handling, one-page and unsupported sources, failure recovery, owner isolation, reload, mobile/reduced motion, equation bounds, and no unexpected runtime/React console errors. `git diff --check`: passed. Expected HTTP-negative-case console messages are excluded from the unexpected-error assertion.
+
+**Evidence:** [verification report](../reports/ui-verification.md), `reports/ui-*.png`, and `reports/ui-browser-metrics.json`. These use synthetic fixture data. The local timings are single observations, not percentiles or live-model measurements. Backend regression tests are in `backend/tests/test_workspace_regressions.py`; browser tests are in `frontend/e2e/workspace.spec.ts`.
+
+**Mode and preview:** offline fixture teaching, empty provider key, reviewed local NumPy recipes. All three recipes were executed in browser tests. A visible disposable Chrome preview was opened at `http://127.0.0.1:5174` (isolated API 8081); reopen with `npm --prefix frontend run preview:fixture`. Closing that browser window stops its preview servers. This is local development, not hosting/deployment evidence.
+
+**Genuine remaining limits:** live Meta compatibility was not rerun; isolated parser/runner containers, durable job/cancellation behavior, and cleanup still need M5 release verification. Complete owner erasure remains incomplete: existing deletion removes PDFs/revokes access but leaves database content. Automatic approval review rejected the broader purge change, and the prepared `reports/proposed-owner-data-purge.patch` is unapplied pending requested user approval. The UI discloses the current deletion limit. Do not mark P0-16 or M5 complete from these tests.
+
+**Next step:** resolve the pending owner-erasure decision, then verify the release isolation/worker/failure boundaries and a real supported Meta journey. Do not substitute a fixture preview for that evidence.
+
+> Superseded in part by the 29 October entry: the owner purge has since been applied and tested, and the live tests were rerun.
+
+---
+
+## Progress Entry: 29 October 2026 — Review fixes, live-model browser review, and judge-facing accuracy
+
+**Repository/environment:** working tree on `main`, base commit `5aead92`, uncommitted (no commit, push, deployment, or submission). Windows/PowerShell, Python 3.12 venv, Node 24, Google Chrome. `.env` uses `MODEL_MODE=live` with a configured key (value not recorded).
+
+**Input:** a cloud code review of the working-tree diff (10 findings), followed by user, judge, and developer passes.
+
+**Review findings and outcome**
+
+| Finding | Outcome |
+| --- | --- |
+| Icon.tsx, Math.tsx, e2e/, playwright.config.ts missing | Not a code defect: the files exist but are **untracked**. They must be added with the commit or the frontend build fails |
+| Failed first tutor turn leaves an empty session that holds quota and reopens on reload | Fixed: such a session is removed; the failed job is kept (D-18) |
+| Live answer graded before the provider call, so a retry is double-graded | Fixed: grading happens after the provider succeeds; the failed call's budget is `released` (D-19) |
+| Guest reuse makes upload/session quotas permanent; repeated example uploads use up slots | Fixed: same-SHA-256 uploads return the existing document; quota messages explain the reset (D-18) |
+| Deletion blocked forever when a stored key is outside the current document root | Fixed: uploads are removed by document identity; unrelated files are never touched (D-21) |
+| Vite proxy 8080 vs documented uvicorn 8000 | Fixed in README and doc 17 (8080 was the user's existing local choice) |
+| Live question resets the task to v1-a | Fixed: non-answer events carry the current task forward |
+| Orphaned RUNNING job locks the lesson until expiry | Fixed: API tutor jobs carry a 180 s lease that the busy checks honour (D-20) |
+| Duplicated "latest tutor step" query | Fixed: `latest_tutor_step` helper |
+| Four hand-built ExperimentRun copies; drifted live seed run | Fixed: `experiment_run_record` helper; the seed run records its job and timestamps |
+
+**Found in the live-model browser review** (isolated data directory, real `muse-spark-1.3`): model board commands were always dropped (invalid `concept_card` objects); the tutor note sometimes became a generic fallback (reasoning tokens exhausted `max_tokens=1500`, or an empty final reply overwrote the step narration); aliased recipe inputs failed strict validation; the seeded scaling plot could bind to a softmax run; the lab showed "4/5 checks passed" when one check was only not applicable. All fixed (D-22). After the fixes the live lesson showed model narration, a model note on the board, the second task variant after a correct answer, the same variant after a question, full restoration on reload, and complete deletion. Per-turn latency was 18–36 s (single observations).
+
+**Judge-facing accuracy:** the README claimed 21/25 tests, `META_API_URL`/`MAX_TUTOR_TURNS` settings that do not exist, a `[fixture: …]` UI label, a sandboxed runner, and a PDF-only purge. These were corrected to observed facts. The stale "erasure not implemented" statements in docs 03 and 22, CHANGELOG, and the 28 October UI report were corrected or annotated: the purge (`reports/proposed-owner-data-purge.patch`, now superseded) was applied after the 28 October entry.
+
+**Checks (29 October):**
+
+- `pytest backend/tests -m "not live_meta"`: 66 passed, 2 deselected.
+- `pytest backend/tests -m live_meta`: 2 passed.
+- `ruff check backend/`: passed.
+- `npm --prefix frontend run build` and `lint`: passed.
+- `npx playwright test`: 9/9 passed.
+- `git diff --check`: clean.
+
+Each new regression was confirmed to fail with its fix reverted.
+
+**Genuine remaining limits:**
+
+- Retention sweeper for expired guests (T-DATA-02) is not implemented or verified, so P0-16 is not complete.
+- Isolated parser/runner containers are not verified.
+- Tutor/recipe routes are still synchronous.
+- The live benchmark was not rerun.
+- Live model behavior varies: it sometimes needs a second `run_experiment` after a rejected parameter set; the rejection is returned to the model, which corrected itself in every observed case.
+- A board plot bound to an earlier run shows a placeholder until selected (existing exact-run design).
+
+**Next step:** commit the change *including the untracked frontend files*, then implement and test the expiry sweeper (T-DATA-02) and verify container isolation before release.

@@ -107,6 +107,7 @@ class ClaimLabEvaluator:
         case = BenchmarkCase("CASE-01", "Supported Attention Passage Grounding", "Source-linked explanation with verified board nodes")
         t0 = time.time()
         try:
+            self.client.cookies.clear()
             res_guest = self.client.post("/api/v1/guest-sessions")
             csrf = res_guest.json()["csrf_token"]
             with open("examples/claimlab_attention_lab.pdf", "rb") as f:
@@ -135,6 +136,8 @@ class ClaimLabEvaluator:
         case = BenchmarkCase("CASE-02", "Unrelated Passage Topic Boundary", "Explicit boundary; no fabricated experiment")
         t0 = time.time()
         try:
+            # Each independent scenario starts with a new browser owner.
+            self.client.cookies.clear()
             res_guest = self.client.post("/api/v1/guest-sessions")
             csrf = res_guest.json()["csrf_token"]
             with open("examples/unsupported_sample.pdf", "rb") as f:
@@ -188,6 +191,8 @@ class ClaimLabEvaluator:
         case = BenchmarkCase("CASE-05", "Two-Variant Progression Rule", "Two variants required before supported_independently")
         t0 = time.time()
         try:
+            # Each independent scenario starts with a new browser owner.
+            self.client.cookies.clear()
             res_guest = self.client.post("/api/v1/guest-sessions")
             csrf = res_guest.json()["csrf_token"]
             with open("examples/claimlab_attention_lab.pdf", "rb") as f:
@@ -315,6 +320,8 @@ class ClaimLabEvaluator:
         case = BenchmarkCase("CASE-11", "Revision Conflict & Optimistic Concurrency", "Stale expected revision returns HTTP 409")
         t0 = time.time()
         try:
+            # Each independent scenario starts with a new browser owner.
+            self.client.cookies.clear()
             res_guest = self.client.post("/api/v1/guest-sessions")
             csrf = res_guest.json()["csrf_token"]
             with open("examples/claimlab_attention_lab.pdf", "rb") as f:
@@ -337,9 +344,11 @@ class ClaimLabEvaluator:
         self.cases.append(case)
 
     def _eval_case_12_privacy_purge(self):
-        case = BenchmarkCase("CASE-12", "Complete Privacy Purge Lifecycle", "DELETE /api/v1/me/data purges files and revokes access")
+        case = BenchmarkCase("CASE-12", "Guest Revocation Lifecycle", "DELETE /api/v1/me/data revokes the guest; database content erasure is not established by this case")
         t0 = time.time()
         try:
+            # Each independent scenario starts with a new browser owner.
+            self.client.cookies.clear()
             res_guest = self.client.post("/api/v1/guest-sessions")
             csrf = res_guest.json()["csrf_token"]
             with open("examples/claimlab_attention_lab.pdf", "rb") as f:
@@ -349,7 +358,7 @@ class ClaimLabEvaluator:
             res_after = self.client.get("/api/v1/me")
 
             if res_del.status_code == 202 and res_after.status_code == 401:
-                case.pass_case({"deletion_status": "deleted", "post_deletion_auth": 401})
+                case.pass_case({"guest_status": "revoked", "post_deletion_auth": 401})
             else:
                 case.fail_case(f"Expected 202 delete and 401 auth, got {res_del.status_code} and {res_after.status_code}")
         except Exception as e:

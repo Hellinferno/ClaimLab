@@ -27,8 +27,8 @@
 
 [![Meta AI](https://img.shields.io/badge/META%20AI-Developer%20Hackathon-7928CA?style=for-the-badge&logo=meta&logoColor=white)](https://meta.com)
 [![Model](https://img.shields.io/badge/NEURAL%20BACKBONE-muse--spark--1.3-00DFD8?style=for-the-badge&logo=meta&logoColor=black)](#-neural-orchestration-meta-muse-spark-13)
-[![Test Matrix](https://img.shields.io/badge/SYSTEM%20TESTS-25%2F25%20PASSED-00F59B?style=for-the-badge&logo=pytest&logoColor=black)](#-system-telemetry--test-verification)
-[![Client](https://img.shields.io/badge/CLIENT-React%2019%20%7C%20TypeScript%205-61DAFB?style=for-the-badge&logo=react&logoColor=black)](#-client-architecture)
+[![Test Matrix](https://img.shields.io/badge/SYSTEM%20TESTS-66%20OFFLINE%20%2B%202%20LIVE%20PASSED-00F59B?style=for-the-badge&logo=pytest&logoColor=black)](#-system-telemetry--test-verification)
+[![Client](https://img.shields.io/badge/CLIENT-React%2019%20%7C%20TypeScript%206-61DAFB?style=for-the-badge&logo=react&logoColor=black)](#-client-architecture)
 [![Kernel](https://img.shields.io/badge/NUMERICAL%20KERNEL-Python%203.12%20%7C%20FastAPI-FF007A?style=for-the-badge&logo=python&logoColor=white)](#-backend-engine)
 [![License](https://img.shields.io/badge/LICENSE-MIT-7928CA?style=for-the-badge)](LICENSE)
 
@@ -62,7 +62,7 @@ Traditional generative AI tutors suffer from three critical flaws:
 3. **Superficial Feedback Loops:** Simple chat turns acknowledge student answers without altering subsequent pedagogical strategy.
 
 ### ClaimLab's Core Breakthrough
-* **100% Measured Visuals:** Every plot, curve, and heatmap is rendered exclusively from retained numerical simulation outputs calculated by a sandboxed float64 runner.
+* **100% Measured Visuals:** Every plot, curve, and heatmap is rendered exclusively from retained numerical simulation outputs calculated by the reviewed float64 NumPy runner.
 * **Strict Epistemic Partitioning:** All teacher utterances are tagged explicitly with `[Source]`, `[Experiment]`, or `[Background]` grounding badges.
 * **Evidence-Based Adaptation:** Student actions advance categorical mastery (`Introduced` &rarr; `Needs Check` &rarr; `Supported with Help` &rarr; `Supported Independently`). Progressing to independent mastery strictly requires completing **two distinct mathematical variants**.
 
@@ -201,6 +201,7 @@ ClaimLab includes 12 canonical tasks covering the foundational attention curricu
 * **Complete Data Purge (`DELETE /api/v1/me/data`):**
   - Increments fencing generation numbers to invalidate inflight background jobs.
   - Deletes physical PDF files from storage.
+  - Erases the owner's extracted text, selections, sessions, board snapshots, events, evidence, runs, jobs, and idempotency records, keeping only a content-free deletion receipt.
   - Revokes guest credentials immediately; subsequent requests return HTTP 401.
 
 ---
@@ -223,11 +224,11 @@ python -m venv .venv
 pip install -r backend/requirements.txt
 pip install -e backend --no-deps
 
-# Run full test suite (21 unit & integration tests)
-pytest backend/tests/ -v
+# Run the offline test suite (live Meta tests are marked live_meta and need MODEL_MODE=live + META_API_KEY)
+pytest backend/tests -m "not live_meta"
 
-# Start FastAPI application
-python -m uvicorn claimlab.api:app --host 127.0.0.1 --port 8000 --reload
+# Start FastAPI application (the Vite dev proxy targets port 8080 by default)
+python -m uvicorn claimlab.api:app --host 127.0.0.1 --port 8080 --reload
 ```
 
 ### 3. Frontend Setup
@@ -238,10 +239,13 @@ npm --prefix frontend install
 # Build production bundle
 npm --prefix frontend run build
 
-# Start Vite development server
+# Start Vite development server (set VITE_API_TARGET to proxy to an API on another port)
 npm --prefix frontend run dev
+
+# Optional: Chrome end-to-end flows (starts its own isolated fixture API on 8081 and UI on 5174)
+npm --prefix frontend run test:e2e
 ```
-Open **[http://localhost:5173](http://localhost:5173)** in your browser.
+Open **[http://127.0.0.1:5173](http://127.0.0.1:5173)** in your browser.
 
 ### 4. Background Async Worker
 ```bash
@@ -253,17 +257,15 @@ python -m claimlab.worker
 ## 🤖 Neural Orchestration & Meta muse-spark-1.3
 
 ```ini
-# .env Configuration
+# .env Configuration (see .env.example for every setting)
 APP_ENV=development
 MODEL_MODE=fixture          # Set to 'live' when META_API_KEY is active
 META_MODEL=muse-spark-1.3
-META_API_URL=https://api.meta.ai/v1/chat/completions
+META_BASE_URL=https://api.meta.ai/v1
 META_API_KEY=your_key_here
-MAX_TUTOR_TURNS=5
-BUDGET_RESERVATION_TOKENS=4096
 ```
 
-> **Hackathon Invariant:** When `MODEL_MODE=fixture` is active, the interface and logs explicitly display `[fixture: muse-spark-1.3]`. The fixture returns verified deterministic tool invocations and whiteboard patches, ensuring zero hallucination even during local development without network access.
+> **Hackathon Invariant:** When `MODEL_MODE=fixture` is active, the workspace header shows **Fixture mode · offline teaching** and the session menu reports the teaching mode. The fixture returns deterministic reviewed teaching steps and whiteboard patches for local development without network access. In `live` mode a provider failure returns a recoverable 503; it never silently substitutes fixture content.
 
 ---
 
@@ -281,7 +283,7 @@ BUDGET_RESERVATION_TOKENS=4096
 | 2-Variant Rule | `T-LEARN-01` | **PASSED** | 2 distinct variants required before `supported_independently` |
 | Idempotency Engine | `T-IDEM-01` | **PASSED** | Deterministic replay for identical key; rejects mismatched hashes |
 | Job Cancellation | `T-JOB-01` | **PASSED** | Fencing generation increment and cooperative worker cancellation |
-| Data Purge | `T-DATA-01` | **PASSED** | Full filesystem deletion and instant 401 unauthenticated response |
+| Data Purge | `T-DATA-01` | **PASSED** | Owner's PDFs and database records erased, other owners untouched, instant 401 unauthenticated response |
 | Worker Leasing | `T-WORKER-01` | **PASSED** | Durable job claim, lease expiration recovery (`WORKER_LOST`) |
 | Transfer Note | `T-JOURNEY-02` | **PASSED** | End-to-end learning session on heldout attention transfer PDF |
 | Recipe Integration | `T-RECIPE-AC` | **PASSED** | Multi-recipe execution within active session with strict schema validation |
@@ -291,7 +293,10 @@ BUDGET_RESERVATION_TOKENS=4096
 | Evaluation Benchmark | `EVAL-HARNESS` | **PASSED** | All 12 behavioral cases from `docs/12_EVALUATION_HARNESS.md` verified (100%) |
 
 ```bash
-======================== 25 passed, 1 warning in 4.36s ========================
+# 29 October 2026, local Windows run
+pytest backend/tests -m "not live_meta"   →  66 passed, 2 deselected
+pytest backend/tests -m live_meta         →   2 passed (real muse-spark-1.3 calls)
+npm --prefix frontend run test:e2e        →   9 passed (Chrome, fixture mode)
 ```
 
 ---
@@ -315,9 +320,10 @@ ClaimLab/
 │   │   ├── whiteboard/                # Atomic whiteboard patch engine
 │   │   ├── learning/                  # 12-task canonical bank & adaptation policy
 │   │   └── services/                  # PDF parser & Meta agent orchestrator
-│   └── tests/                         # Pytest test suites (21 passing)
+│   └── tests/                         # Pytest suites (offline + live_meta)
 ├── frontend/
-│   ├── package.json                   # React 19 + TypeScript 5
+│   ├── package.json                   # React 19 + TypeScript 6
+│   ├── e2e/                           # Playwright Chrome flows
 │   ├── vite.config.ts                 # Vite bundle configuration
 │   └── src/
 │       ├── App.tsx                    # Reactive workspace layout

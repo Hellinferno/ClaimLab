@@ -63,16 +63,30 @@ from claimlab.models import (
     Job,
     JobEvent,
     IdempotencyRecord,
+    TaskAttempt,
+    TeachingDecision,
+    ToolInvocation,
+    BudgetReservation,
 )
 from claimlab.numerics.runner import runner
+from claimlab.learning.task_bank import TASK_REGISTRY
 from claimlab.security import (
     GUEST_COOKIE_NAME,
     create_guest,
     get_current_guest,
     verify_csrf,
+    hash_token,
 )
 from claimlab.services.pdf_service import extract_pdf_content, create_anchors_for_text
-from claimlab.services.agent_orchestrator import AgentOrchestrator
+from claimlab.services.agent_orchestrator import (
+    AgentOrchestrator,
+    ProviderUnavailableError,
+    experiment_run_record,
+    latest_tutor_step,
+)
+
+# Matches the default Job.deadline_seconds and exceeds a bounded live tool loop.
+TUTOR_TURN_LEASE = timedelta(seconds=180)
 
 # Initialize database tables
 Base.metadata.create_all(bind=engine)
@@ -171,6 +185,85 @@ def record_idempotency(
     db.commit()
 
 
+def execute_tutor_job(db: Session, session: LearningSession, job: Job, trigger_event_id: Optional[str] = None) -> None:
+    """Keep job status and the session lock truthful after provider failures."""
+    try:
+        AgentOrchestrator(db).execute_tutor_turn(session.id, job.id, trigger_event_id)
+    except Exception as exc:
+        db.rollback()
+        db.refresh(job)
+        db.refresh(session)
+        job.status = JobStatus.FAILED.value
+        job.error_code = "PROVIDER_UNAVAILABLE" if isinstance(exc, ProviderUnavailableError) else "SERVICE_NOT_READY"
+        job.error_message = "The tutor did not finish. Your saved lesson is available; try again."
+        if session.active_job_id == job.id:
+            session.active_job_id = None
+        db.commit()
+        raise HTTPException(status_code=503, detail={"code": job.error_code, "message": job.error_message}) from exc
+    job.status = JobStatus.SUCCEEDED.value
+    job.progress = 1.0
+    if session.active_job_id == job.id:
+        session.active_job_id = None
+    db.commit()
+
+
+def session_is_busy(db: Session, session: LearningSession) -> bool:
+    """True while the session's mutation job may still be running.
+
+    A turn whose lease has passed was orphaned (for example, by a restart
+    mid-turn); it is failed and its lock released instead of blocking forever.
+    """
+    if not session.active_job_id:
+        return False
+    job = db.query(Job).filter(Job.id == session.active_job_id).first()
+    if not job or job.status not in (JobStatus.QUEUED.value, JobStatus.RUNNING.value):
+        return False
+    lease = job.lease_expires_at
+    if lease is None or lease.replace(tzinfo=timezone.utc) > datetime.now(timezone.utc):
+        return True
+    job.status = JobStatus.FAILED.value
+    job.error_code = "WORKER_LOST"
+    job.error_message = "The lesson update stopped before finishing."
+    session.active_job_id = None
+    session.fencing_generation += 1
+    db.commit()
+    return False
+
+
+def discard_unstarted_session(db: Session, session_id: str) -> None:
+    """Drop a lesson whose first tutor turn failed.
+
+    It has nothing to resume, so it must neither hold session quota nor reopen
+    as the active lesson. The failed job remains as the record of the attempt.
+    """
+    for model in (TaskAttempt, TeachingDecision, ConceptEvidence, BoardSnapshot, LearnerEvent, ExperimentRun):
+        db.query(model).filter(model.session_id == session_id).delete(synchronize_session=False)
+    db.query(LearningSession).filter(LearningSession.id == session_id).delete(synchronize_session=False)
+    db.commit()
+
+
+def remove_stored_upload(doc: DBDocument, document_root: Path) -> None:
+    """Unlink an owner's stored PDF without ever touching unrelated files.
+
+    Uploads live at <document_root>/<document id>.pdf. A stored key elsewhere
+    predates a DATA_DIR change; that file is removed only when its name and
+    digest prove it is this upload.
+    """
+    canonical = document_root / f"{doc.id}.pdf"
+    targets = [canonical]
+    if doc.storage_key:
+        stored = Path(doc.storage_key).resolve()
+        if (
+            stored != canonical
+            and stored.name == canonical.name
+            and stored.is_file()
+            and hashlib.sha256(stored.read_bytes()).hexdigest() == doc.sha256
+        ):
+            targets.append(stored)
+    for target in targets:
+        target.unlink(missing_ok=True)
+
+
 # --- Health Endpoints ---
 @app.get("/health/live")
 def health_live():
@@ -203,14 +296,29 @@ def create_guest_session(request: Request, response: Response, db: Session = Dep
             detail={"code": "ORIGIN_REJECTED", "message": f"Rejected origin: {origin}"},
         )
 
-    owner, raw_cookie, raw_csrf = create_guest(db)
+    # Reuse the browser's owner so bootstrap and reload can actually resume work.
+    # The derived CSRF token remains stable across tabs without storing it raw.
+    raw_cookie = request.cookies.get(GUEST_COOKIE_NAME)
+    owner = None
+    if raw_cookie:
+        owner = db.query(GuestOwner).filter(
+            GuestOwner.credential_hash == hash_token(raw_cookie),
+            GuestOwner.deleted_at.is_(None),
+            GuestOwner.expires_at > datetime.now(timezone.utc),
+        ).first()
+    if owner:
+        raw_csrf = hash_token(f"csrf:{raw_cookie}")
+        owner.csrf_secret_hash = hash_token(raw_csrf)
+        db.commit()
+    else:
+        owner, raw_cookie, raw_csrf = create_guest(db)
     response.set_cookie(
         key=GUEST_COOKIE_NAME,
         value=raw_cookie,
         httponly=True,
         secure=settings.APP_ENV != "development",
         samesite="lax",
-        max_age=86400,
+        max_age=max(0, int((owner.expires_at.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)).total_seconds())),
     )
     return GuestSessionResponse(
         expires_at=owner.expires_at.isoformat(),
@@ -248,6 +356,7 @@ def delete_my_data(
 
     now = datetime.now(timezone.utc)
     guest.deleted_at = now
+    db.flush()
 
     # Cancel active jobs and increment fencing generation
     sessions = db.query(LearningSession).filter(LearningSession.owner_id == guest.id).all()
@@ -260,14 +369,41 @@ def delete_my_data(
         j.cancelled = True
         j.status = JobStatus.CANCELLED.value
 
-    # Delete physical PDF files
+    # A failed unlink must not be reported as successful erasure; rollback
+    # keeps this guest authenticated so the same confirmed action can be retried.
     docs = db.query(DBDocument).filter(DBDocument.owner_id == guest.id).all()
+    document_root = (settings.data_path / "documents").resolve()
     for doc in docs:
         try:
-            if doc.storage_key and os.path.exists(doc.storage_key):
-                os.remove(doc.storage_key)
-        except Exception:
-            pass
+            remove_stored_upload(doc, document_root)
+        except OSError as exc:
+            db.rollback()
+            raise HTTPException(status_code=503, detail={
+                "code": "SERVICE_NOT_READY",
+                "message": "Some uploaded files could not be removed. Your session is still active; please try deleting again.",
+            }) from exc
+
+    # Purge the authenticated owner's private content, children before parents.
+    # Keep only the revoked guest and a content-free deletion receipt. No data
+    # is erased merely by deploying this code: the guest must invoke this route.
+    db.flush()
+    session_ids = [s.id for s in sessions]
+    document_ids = [doc.id for doc in docs]
+    job_ids = [row[0] for row in db.query(Job.id).filter(Job.owner_id == guest.id).all()]
+    for model in (ToolInvocation, JobEvent):
+        db.query(model).filter(model.job_id.in_(job_ids)).delete(synchronize_session=False)
+    for model in (TaskAttempt, TeachingDecision, ConceptEvidence, BoardSnapshot):
+        db.query(model).filter(model.session_id.in_(session_ids)).delete(synchronize_session=False)
+    db.query(LearnerEvent).filter(LearnerEvent.owner_id == guest.id).delete(synchronize_session=False)
+    db.query(ExperimentRun).filter(ExperimentRun.owner_id == guest.id).delete(synchronize_session=False)
+    db.query(BudgetReservation).filter(BudgetReservation.owner_id == guest.id).delete(synchronize_session=False)
+    db.query(Job).filter(Job.owner_id == guest.id).delete(synchronize_session=False)
+    db.query(LearningSession).filter(LearningSession.owner_id == guest.id).delete(synchronize_session=False)
+    db.query(SourceSelection).filter(SourceSelection.owner_id == guest.id).delete(synchronize_session=False)
+    for model in (DBSourceAnchor, DocumentPage):
+        db.query(model).filter(model.document_id.in_(document_ids)).delete(synchronize_session=False)
+    db.query(DBDocument).filter(DBDocument.owner_id == guest.id).delete(synchronize_session=False)
+    db.query(IdempotencyRecord).filter(IdempotencyRecord.owner_id == guest.id).delete(synchronize_session=False)
 
     db.commit()
 
@@ -278,7 +414,7 @@ def delete_my_data(
 
 # --- Document Upload & Anchoring ---
 @app.post("/api/v1/documents", status_code=status.HTTP_202_ACCEPTED)
-async def upload_document(
+def upload_document(
     request: Request,
     file: UploadFile = File(...),
     idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
@@ -287,21 +423,15 @@ async def upload_document(
 ):
     verify_csrf(request, request.headers.get("X-CSRF-Token"), guest)
 
-    # Check owner storage quota: max 3 documents
-    doc_count = db.query(DBDocument).filter(DBDocument.owner_id == guest.id).count()
-    if doc_count >= 3:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={"code": "PARAMETERS_INVALID", "message": "Maximum 3 documents per owner quota reached"},
-        )
-
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"code": "UNSUPPORTED_DOCUMENT", "message": "Only native PDF files are supported"},
         )
 
-    file_bytes = await file.read()
+    # A sync route runs parsing in FastAPI's thread pool, leaving the event loop
+    # available for other students, progress requests, and cancellation.
+    file_bytes = file.file.read(10 * 1024 * 1024 + 1)
     if len(file_bytes) > 10 * 1024 * 1024:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -313,14 +443,28 @@ async def upload_document(
     if cached:
         return cached[1]
 
+    # The same PDF is one document: uploading it again (for example, starting
+    # the example lesson twice) returns it instead of consuming quota.
+    existing = db.query(DBDocument).filter(DBDocument.owner_id == guest.id, DBDocument.sha256 == sha256).first()
+    if existing:
+        parse_job = db.query(Job).filter(Job.document_id == existing.id, Job.kind == JobKind.PARSE_DOCUMENT.value).first()
+        res_data = {"document_id": existing.id, "job_id": parse_job.id}
+        record_idempotency(db, guest.id, "upload_document", idempotency_key, {"sha256": sha256}, 202, res_data)
+        return res_data
+
+    # Check owner storage quota: max 3 documents
+    doc_count = db.query(DBDocument).filter(DBDocument.owner_id == guest.id).count()
+    if doc_count >= 3:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "PARAMETERS_INVALID",
+                "message": "This guest workspace already holds 3 documents. Use Delete my data under Your session to start fresh.",
+            },
+        )
+
     doc_id = str(uuid.uuid4())
     job_id = str(uuid.uuid4())
-
-    storage_dir = settings.data_path / "documents"
-    storage_dir.mkdir(parents=True, exist_ok=True)
-    storage_path = storage_dir / f"{doc_id}.pdf"
-    with open(storage_path, "wb") as f:
-        f.write(file_bytes)
 
     try:
         ext_result = extract_pdf_content(file_bytes)
@@ -329,6 +473,13 @@ async def upload_document(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"code": "UNSUPPORTED_DOCUMENT", "message": f"Failed to parse PDF: {str(e)}"},
         )
+
+    # Invalid uploads never become orphan files in private storage.
+    storage_dir = settings.data_path / "documents"
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    storage_path = storage_dir / f"{doc_id}.pdf"
+    with open(storage_path, "wb") as f:
+        f.write(file_bytes)
 
     doc = DBDocument(
         id=doc_id,
@@ -492,6 +643,7 @@ def create_selection(
     pages = (
         db.query(DocumentPage)
         .filter(DocumentPage.document_id == document_id, DocumentPage.page_number.between(req.page_start, req.page_end))
+        .order_by(DocumentPage.page_number)
         .all()
     )
     combined_text = "\n".join(p.normalized_text for p in pages)
@@ -507,7 +659,7 @@ def create_selection(
     topic_assessment = "supported" if is_supported_topic else "unsupported"
 
     content_hash = hashlib.sha256(combined_text.encode("utf-8")).hexdigest()
-    cached = handle_idempotency(db, guest.id, "create_selection", idempotency_key, {"doc_id": document_id, "start": req.page_start, "end": req.page_end, "hash": content_hash})
+    cached = handle_idempotency(db, guest.id, "create_selection", idempotency_key, {"doc_id": document_id, "start": req.page_start, "end": req.page_end, "hash": content_hash, "question": req.question})
     if cached:
         return cached[1]
 
@@ -553,7 +705,7 @@ def create_selection(
         "content_hash": content_hash,
         "topic_assessment": topic_assessment,
     }
-    record_idempotency(db, guest.id, "create_selection", idempotency_key, {"doc_id": document_id, "start": req.page_start, "end": req.page_end, "hash": content_hash}, 201, res_data)
+    record_idempotency(db, guest.id, "create_selection", idempotency_key, {"doc_id": document_id, "start": req.page_start, "end": req.page_end, "hash": content_hash, "question": req.question}, 201, res_data)
     return res_data
 
 
@@ -568,21 +720,29 @@ def create_learning_session(
 ):
     verify_csrf(request, request.headers.get("X-CSRF-Token"), guest)
 
+    cached = handle_idempotency(db, guest.id, "create_session", idempotency_key, req.model_dump(mode="json"))
+    if cached:
+        return cached[1]
+
     # Check session quota: max 5 sessions per owner
     sess_count = db.query(LearningSession).filter(LearningSession.owner_id == guest.id).count()
     if sess_count >= 5:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={"code": "PARAMETERS_INVALID", "message": "Maximum 5 learning sessions per owner quota reached"},
+            detail={
+                "code": "PARAMETERS_INVALID",
+                "message": "This guest workspace has reached its limit of 5 lessons. Continue the current lesson, or use Delete my data under Your session to start fresh.",
+            },
         )
 
     selection = db.query(SourceSelection).filter(SourceSelection.id == req.selection_id, SourceSelection.owner_id == guest.id).first()
     if not selection:
         raise HTTPException(status_code=404, detail={"code": "RESOURCE_NOT_FOUND", "message": "Selection not found"})
-
-    cached = handle_idempotency(db, guest.id, "create_session", idempotency_key, {"sel_id": req.selection_id, "goal": req.goal})
-    if cached:
-        return cached[1]
+    if selection.topic_assessment != "supported":
+        raise HTTPException(status_code=422, detail={
+            "code": "UNSUPPORTED_DOCUMENT",
+            "message": "This source is outside the supported attention, softmax, and causal masking labs. Choose a relevant passage or try the example note.",
+        })
 
     session_id = str(uuid.uuid4())
     job_id = str(uuid.uuid4())
@@ -607,25 +767,24 @@ def create_learning_session(
         kind=JobKind.TUTOR_TURN.value,
         status=JobStatus.RUNNING.value,
         progress=0.1,
+        lease_expires_at=datetime.now(timezone.utc) + TUTOR_TURN_LEASE,
     )
     db.add(init_job)
     db.commit()
 
     # Execute initial tutor turn
-    orchestrator = AgentOrchestrator(db)
-    orchestrator.execute_tutor_turn(session_id, job_id)
-
-    init_job.status = JobStatus.SUCCEEDED.value
-    init_job.progress = 1.0
-    new_session.active_job_id = None
-    db.commit()
+    try:
+        execute_tutor_job(db, new_session, init_job)
+    except HTTPException:
+        discard_unstarted_session(db, session_id)
+        raise
 
     res_data = {
         "session_id": session_id,
         "revision": new_session.revision,
         "initial_job_id": job_id,
     }
-    record_idempotency(db, guest.id, "create_session", idempotency_key, {"sel_id": req.selection_id, "goal": req.goal}, 202, res_data)
+    record_idempotency(db, guest.id, "create_session", idempotency_key, req.model_dump(mode="json"), 202, res_data)
     return res_data
 
 
@@ -664,22 +823,36 @@ def get_learning_session(
     )
     scene = json.loads(snapshot.scene_json) if snapshot else {"schema_version": 1, "board_revision": 0, "objects": []}
 
-    evidence = db.query(ConceptEvidence).filter(ConceptEvidence.session_id == session_id).all()
+    evidence = db.query(ConceptEvidence).filter(ConceptEvidence.session_id == session_id).order_by(ConceptEvidence.created_at).all()
     ev_summary = {e.concept_id: EvidenceCategory(e.category) for e in evidence}
 
     latest_run = db.query(ExperimentRun).filter(ExperimentRun.session_id == session_id).order_by(ExperimentRun.started_at.desc()).first()
+    latest_step = latest_tutor_step(db, session_id)
 
-    recent_event = (
-        db.query(JobEvent)
-        .join(Job, JobEvent.job_id == Job.id)
-        .filter(Job.session_id == session_id, JobEvent.event_type == "tutor_turn_completed")
-        .order_by(JobEvent.created_at.desc(), JobEvent.id.desc())
-        .first()
-    )
-    active_task = None
-    if recent_event:
-        payload = json.loads(recent_event.payload_json)
-        active_task = payload.get("active_task")
+    selection = db.query(SourceSelection).filter(
+        SourceSelection.id == session.selection_id,
+        SourceSelection.owner_id == guest.id,
+    ).first()
+    source_selection = None
+    if selection:
+        selected_anchors = db.query(DBSourceAnchor).filter(
+            DBSourceAnchor.document_id == selection.document_id,
+            DBSourceAnchor.page_number.between(selection.page_start, selection.page_end),
+        ).order_by(DBSourceAnchor.page_number, DBSourceAnchor.start_offset).all()
+        source_selection = SourceSelectionResponse(
+            selection_id=selection.id,
+            document_id=selection.document_id,
+            page_start=selection.page_start,
+            page_end=selection.page_end,
+            question=selection.question,
+            anchors=[SourceAnchorContract(
+                id=a.id, document_id=a.document_id, page_number=a.page_number,
+                start_offset=a.start_offset, end_offset=a.end_offset,
+                quote=a.quote, text_hash=a.text_hash,
+            ) for a in selected_anchors],
+            content_hash=selection.content_hash,
+            topic_assessment=selection.topic_assessment,
+        )
 
     return SessionStateResponse(
         session_id=session.id,
@@ -688,8 +861,10 @@ def get_learning_session(
         active_job_id=session.active_job_id,
         board=scene,
         evidence_summary=ev_summary,
-        active_task=active_task,
+        active_task=latest_step.get("active_task"),
         latest_run_id=latest_run.id if latest_run else None,
+        source_selection=source_selection,
+        tutor_narration=latest_step.get("narration"),
     )
 
 
@@ -708,14 +883,16 @@ def submit_learner_event(
     if not session:
         raise HTTPException(status_code=404, detail={"code": "RESOURCE_NOT_FOUND", "message": "Session not found"})
 
+    cached = handle_idempotency(db, guest.id, f"event_{session_id}", idempotency_key, req.model_dump(mode="json"))
+    if cached:
+        return cached[1]
+
     # Check for active running job mutex (409 SESSION_BUSY)
-    if session.active_job_id:
-        active_job = db.query(Job).filter(Job.id == session.active_job_id).first()
-        if active_job and active_job.status == JobStatus.RUNNING.value:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={"code": "SESSION_BUSY", "message": "A mutation job is currently executing on this session"},
-            )
+    if session_is_busy(db, session):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "SESSION_BUSY", "message": "A mutation job is currently executing on this session"},
+        )
 
     if req.expected_revision != session.revision:
         raise HTTPException(
@@ -727,9 +904,24 @@ def submit_learner_event(
             },
         )
 
-    cached = handle_idempotency(db, guest.id, f"event_{session_id}", idempotency_key, {"event_id": req.event_id, "rev": req.expected_revision})
-    if cached:
-        return cached[1]
+    active_task = latest_tutor_step(db, session_id).get("active_task")
+    if req.event_type in ("prediction_submitted", "explanation_submitted", "connection_submitted", "hint_requested"):
+        if not active_task or any(req.payload.get(key) != active_task.get(key) for key in ("task_id", "task_variant")):
+            raise HTTPException(status_code=422, detail={"code": "TASK_STALE", "message": "This task has changed. Refresh the lesson before answering."})
+
+    payload = dict(req.payload)
+    # Attribution is server state. Clients cannot move help to another task or
+    # erase it by declaring hints_used=0 on their later answer.
+    payload.pop("assistance_task", None)
+    payload.pop("assistance_delivered", None)
+    if active_task and req.event_type in ("hint_requested", "message_submitted", "object_question_submitted"):
+        task_def = TASK_REGISTRY.get((active_task.get("task_id"), active_task.get("task_variant")))
+        payload["assistance_task"] = {
+            "task_id": active_task.get("task_id"),
+            "task_variant": active_task.get("task_variant"),
+            "concept_id": task_def.concept_id if task_def else session.active_concept,
+        }
+        payload["assistance_delivered"] = False
 
     job_id = str(uuid.uuid4())
     event_count = db.query(LearnerEvent).filter(LearnerEvent.session_id == session_id).count()
@@ -740,7 +932,7 @@ def submit_learner_event(
         session_id=session_id,
         client_event_id=req.event_id,
         event_type=req.event_type,
-        payload_json=json.dumps(req.payload),
+        payload_json=json.dumps(payload),
         expected_revision=req.expected_revision,
         sequence=event_count + 1,
     )
@@ -753,26 +945,25 @@ def submit_learner_event(
         kind=JobKind.TUTOR_TURN.value,
         status=JobStatus.RUNNING.value,
         progress=0.2,
+        lease_expires_at=datetime.now(timezone.utc) + TUTOR_TURN_LEASE,
     )
     db.add(tutor_job)
     session.active_job_id = job_id
     db.commit()
 
     # Execute tutor response turn
-    orchestrator = AgentOrchestrator(db)
-    orchestrator.execute_tutor_turn(session_id, job_id, trigger_event_id=req.event_id)
-
-    tutor_job.status = JobStatus.SUCCEEDED.value
-    tutor_job.progress = 1.0
-    session.active_job_id = None
-    db.commit()
+    execute_tutor_job(db, session, tutor_job, req.event_id)
+    if "assistance_task" in payload:
+        payload["assistance_delivered"] = True
+        event.payload_json = json.dumps(payload)
+        db.commit()
 
     res_data = {
         "event_id": req.event_id,
         "current_revision": session.revision,
         "tutor_job_id": job_id,
     }
-    record_idempotency(db, guest.id, f"event_{session_id}", idempotency_key, {"event_id": req.event_id, "rev": req.expected_revision}, 202, res_data)
+    record_idempotency(db, guest.id, f"event_{session_id}", idempotency_key, req.model_dump(mode="json"), 202, res_data)
     return res_data
 
 
@@ -797,9 +988,14 @@ def execute_session_run(
     if not recipe_id:
         raise HTTPException(status_code=422, detail={"code": "PARAMETERS_INVALID", "message": "recipe_id is required"})
 
-    cached = handle_idempotency(db, guest.id, f"run_{session_id}", idempotency_key, {"recipe": recipe_id, "params": parameters})
+    cached = handle_idempotency(db, guest.id, f"run_{session_id}", idempotency_key, req_body)
     if cached:
         return cached[1]
+
+    if session_is_busy(db, session):
+        raise HTTPException(status_code=409, detail={"code": "SESSION_BUSY", "message": "Wait for the current lesson update before running an experiment."})
+    if "expected_revision" in req_body and req_body["expected_revision"] != session.revision:
+        raise HTTPException(status_code=409, detail={"code": "REVISION_CONFLICT", "message": "The lesson changed. Refresh before running an experiment."})
 
     try:
         run_res = runner.run(recipe_id, parameters)
@@ -807,22 +1003,13 @@ def execute_session_run(
         raise HTTPException(status_code=422, detail={"code": "PARAMETERS_INVALID", "message": str(e)})
 
     job_id = str(uuid.uuid4())
-    db_run = ExperimentRun(
-        id=run_res.run_id,
-        owner_id=guest.id,
-        session_id=session_id,
-        parent_job_id=job_id,
-        recipe_id=run_res.recipe_id.value,
-        parameters_json=json.dumps(run_res.parameters),
-        parameter_hash=run_res.parameter_hash,
-        seed=run_res.seed,
-        status=run_res.status,
-        output_json=json.dumps(run_res.output),
-        checks_json=json.dumps([c.model_dump() for c in run_res.checks]),
-        started_at=datetime.fromisoformat(run_res.started_at),
-        completed_at=datetime.fromisoformat(run_res.completed_at) if run_res.completed_at else None,
-    )
-    db.add(db_run)
+    db.add(experiment_run_record(run_res, guest.id, session_id, job_id))
+    db.add(Job(
+        id=job_id, owner_id=guest.id, session_id=session_id,
+        kind=JobKind.RUN_EXPERIMENT.value,
+        status=JobStatus.SUCCEEDED.value if run_res.status == "succeeded" else JobStatus.FAILED.value,
+        progress=1.0,
+    ))
     db.commit()
 
     res_data = {
@@ -830,7 +1017,7 @@ def execute_session_run(
         "current_revision": session.revision,
         "job_id": job_id,
     }
-    record_idempotency(db, guest.id, f"run_{session_id}", idempotency_key, {"recipe": recipe_id, "params": parameters}, 202, res_data)
+    record_idempotency(db, guest.id, f"run_{session_id}", idempotency_key, req_body, 202, res_data)
     return res_data
 
 
@@ -844,7 +1031,11 @@ def get_run(
     if not run:
         raise HTTPException(status_code=404, detail={"code": "RESOURCE_NOT_FOUND", "message": "Run not found"})
 
-    checks = [json.loads(c) if isinstance(c, str) else c for c in json.loads(run.checks_json)]
+    stored_evidence = json.loads(run.checks_json)
+    # Older records retained checks only; never invent their execution metadata.
+    metadata = stored_evidence if isinstance(stored_evidence, dict) else {}
+    checks = metadata.get("checks", []) if metadata else stored_evidence
+    checks = [json.loads(c) if isinstance(c, str) else c for c in checks]
     return ExperimentRunResponse(
         run_id=run.id,
         recipe_id=run.recipe_id,
@@ -854,9 +1045,9 @@ def get_run(
         status=run.status,
         output=json.loads(run.output_json) if run.output_json else None,
         checks=checks,
-        assumptions=[],
-        runner_digest="local-runner-v1",
-        numpy_version="2.1.3",
+        assumptions=metadata.get("assumptions", []),
+        runner_digest=metadata.get("runner_digest", "not recorded"),
+        numpy_version=metadata.get("numpy_version", "not recorded"),
         started_at=run.started_at.isoformat(),
         completed_at=run.completed_at.isoformat() if run.completed_at else None,
     )
@@ -934,7 +1125,7 @@ def cancel_job(
     if not job:
         raise HTTPException(status_code=404, detail={"code": "RESOURCE_NOT_FOUND", "message": "Job not found"})
 
-    if job.status in [JobStatus.SUCCEEDED.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value]:
+    if job.status in [JobStatus.SUCCEEDED.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value, JobStatus.TIMED_OUT.value]:
         return {"job_id": job.id, "status": job.status, "message": "Job is already terminal"}
 
     job.cancelled = True

@@ -159,7 +159,7 @@ def test_t_tutor_01_unsupported_topic_boundary():
     assert res_sel.json()["topic_assessment"] == "unsupported"
 
 
-def test_t_learn_two_variant_progression():
+def test_t_learn_correcting_feedback_is_not_independent():
     client = TestClient(app)
     res_guest = client.post("/api/v1/guest-sessions")
     csrf = res_guest.json()["csrf_token"]
@@ -210,7 +210,7 @@ def test_t_learn_two_variant_progression():
     state_after_wrong = client.get(f"/api/v1/learning-sessions/{sess_id}").json()
     assert state_after_wrong["evidence_summary"]["attention_scaling"] == "needs_check"
 
-    # 2. Second attempt: First correct independent answer (variant v1-a)
+    # 2. Correcting v1-a after its worked feedback is assisted success.
     res_correct_1 = client.post(
         f"/api/v1/learning-sessions/{sess_id}/events",
         headers={"X-CSRF-Token": csrf},
@@ -232,7 +232,7 @@ def test_t_learn_two_variant_progression():
     # One variant passed independently: advances to variant v1-b, marked supported_with_help/provisional
     assert state_after_c1["active_task"]["task_variant"] == "v1-b"
 
-    # 3. Third attempt: Second correct independent answer (variant v1-b: score 15, dim 25 -> 3)
+    # 3. A fresh v1-b can be independent, but the assisted v1-a cannot count.
     res_correct_2 = client.post(
         f"/api/v1/learning-sessions/{sess_id}/events",
         headers={"X-CSRF-Token": csrf},
@@ -249,9 +249,9 @@ def test_t_learn_two_variant_progression():
     )
     assert res_correct_2.status_code == 202
 
-    # Two distinct variants independently confirmed: marks supported_independently!
+    # Only one variant was independently solved; do not certify two.
     state_after_c2 = client.get(f"/api/v1/learning-sessions/{sess_id}").json()
-    assert state_after_c2["evidence_summary"]["attention_scaling"] == "supported_independently"
+    assert state_after_c2["evidence_summary"]["attention_scaling"] == "supported_with_help"
 
 
 def test_t_idem_01_idempotency_enforcement():
@@ -534,11 +534,12 @@ def test_t_pdf_02_and_03_validation_boundaries():
     with open("examples/claimlab_attention_lab.pdf", "rb") as f:
         pdf_bytes = f.read()
 
+    # Identical bytes are one document, so each upload is a distinct PDF.
     for i in range(3):
         res_ok = client.post(
             "/api/v1/documents",
             headers={"X-CSRF-Token": csrf},
-            files={"file": (f"doc_{i}.pdf", pdf_bytes, "application/pdf")},
+            files={"file": (f"doc_{i}.pdf", pdf_bytes + f"\n% copy {i}\n".encode(), "application/pdf")},
         )
         assert res_ok.status_code == 202
 
@@ -546,7 +547,7 @@ def test_t_pdf_02_and_03_validation_boundaries():
     res_exceeded = client.post(
         "/api/v1/documents",
         headers={"X-CSRF-Token": csrf},
-        files={"file": ("doc_overflow.pdf", pdf_bytes, "application/pdf")},
+        files={"file": ("doc_overflow.pdf", pdf_bytes + b"\n% overflow\n", "application/pdf")},
     )
     assert res_exceeded.status_code == 422
     assert res_exceeded.json()["error"]["code"] == "PARAMETERS_INVALID"

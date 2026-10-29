@@ -1,0 +1,15 @@
+{
+  "measured_at_utc": "2026-10-29T11:05:25.736Z",
+  "model_mode": "fixture",
+  "browser": "Chrome",
+  "viewport": {
+    "width": 1440,
+    "height": 960
+  },
+  "samples": 1,
+  "welcome_to_interactive_ms": 1084,
+  "example_to_task_ms": 1187,
+  "reload_to_restored_task_ms": 923,
+  "javascript_errors": [],
+  "note": "Single local headed-browser observations, not percentiles or live-model latency."
+}

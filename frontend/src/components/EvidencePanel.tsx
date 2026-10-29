@@ -1,15 +1,18 @@
 import React from 'react';
 import type { EvidenceCategory } from '../types';
+import { Icon } from './Icon';
 
 interface EvidencePanelProps {
   evidenceSummary: Record<string, EvidenceCategory>;
 }
 
 const CONCEPTS = [
-  { id: 'attention_scaling', name: 'Attention Scaling (1/√d_k)' },
-  { id: 'query_key_scores', name: 'Query-Key Dot Products' },
-  { id: 'softmax_normalization', name: 'Softmax Normalization' },
-  { id: 'causal_masking', name: 'Causal Lower-Triangular Mask' },
+  { id: 'attention_scaling', name: 'Attention scaling' },
+  { id: 'query_key_scores', name: 'Queries & keys' },
+  { id: 'softmax_normalization', name: 'Softmax normalization' },
+  { id: 'softmax_score_scale', name: 'Score sensitivity' },
+  { id: 'value_weighted_sum', name: 'Weighted values' },
+  { id: 'causal_masking', name: 'Causal masking' },
 ];
 
 export const EvidencePanel: React.FC<EvidencePanelProps> = ({ evidenceSummary }) => {
@@ -21,6 +24,8 @@ export const EvidencePanel: React.FC<EvidencePanelProps> = ({ evidenceSummary })
         return 'badge-purple';
       case 'needs_check':
         return 'badge-orange';
+      case 'needs_revisit':
+        return 'badge-orange';
       case 'introduced':
         return 'badge-blue';
       default:
@@ -31,15 +36,17 @@ export const EvidencePanel: React.FC<EvidencePanelProps> = ({ evidenceSummary })
   const getLabel = (cat?: EvidenceCategory) => {
     switch (cat) {
       case 'supported_independently':
-        return 'Supported Independently';
+        return 'Independent evidence';
       case 'supported_with_help':
-        return 'Supported with Help';
+        return 'With help';
       case 'needs_check':
-        return 'Needs Check';
+        return 'Let’s check';
+      case 'needs_revisit':
+        return 'Revisit';
       case 'introduced':
         return 'Introduced';
       default:
-        return 'Not Assessed';
+        return 'Not explored';
     }
   };
 
@@ -47,13 +54,13 @@ export const EvidencePanel: React.FC<EvidencePanelProps> = ({ evidenceSummary })
     <div className="panel evidence-panel">
       <div className="panel-header">
         <div className="title-row">
-          <span className="icon">📊</span>
-          <h3>Learning Observation Record</h3>
+          <Icon name="chart" size={17}/>
+          <h2>Your learning trail</h2>
         </div>
       </div>
 
       <p className="evidence-intro">
-        Categorical progression updated dynamically from student actions and verified numerical checks.
+        A picture of your thinking, shaped by your attempts. There’s no score to chase.
       </p>
 
       <div className="concept-grid">
@@ -69,6 +76,7 @@ export const EvidencePanel: React.FC<EvidencePanelProps> = ({ evidenceSummary })
           );
         })}
       </div>
+      <p className="evidence-note">One answer is a starting point. New examples help check what carries over.</p>
     </div>
   );
 };

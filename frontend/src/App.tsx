@@ -1,429 +1,206 @@
-import React, { useEffect, useState } from 'react';
-import type {
-  DocumentStatus,
-  DocumentPageDetail,
-  SourceAnchor,
-  SessionState,
-  ExperimentRun,
-  Me,
-} from './types';
+import { useEffect, useRef, useState } from 'react';
+import type { DocumentStatus, DocumentPageDetail, SessionState, ExperimentRun, Me, SourceSelection } from './types';
 import { Whiteboard } from './components/Whiteboard';
 import { ExperimentPanel } from './components/ExperimentPanel';
 import { SourceViewer } from './components/SourceViewer';
 import { TaskCard } from './components/TaskCard';
 import { EvidencePanel } from './components/EvidencePanel';
+import { Icon } from './components/Icon';
 
-export const App: React.FC = () => {
+async function request<T>(url: string, options?: RequestInit): Promise<T> {
+  const response = await fetch(url, options);
+  const body = await response.json().catch(() => null);
+  if (!response.ok) {
+    const detail = body?.error ?? body?.detail;
+    const message = typeof detail === 'string' ? detail : detail?.message;
+    throw new Error(message || (response.status === 422 ? 'Please check the inputs and try again.' : `The request could not finish (${response.status}). Please try again.`));
+  }
+  return body as T;
+}
+const errorMessage = (error: unknown) => error instanceof Error ? error.message : 'Something went wrong. Please try again.';
+
+export default function App() {
   const [me, setMe] = useState<Me | null>(null);
-  const [csrfToken, setCsrfToken] = useState<string>('');
+  const [csrfToken, setCsrfToken] = useState('');
   const [document, setDocument] = useState<DocumentStatus | null>(null);
   const [docPages, setDocPages] = useState<DocumentPageDetail[]>([]);
-  const [anchors, setAnchors] = useState<SourceAnchor[]>([]);
+  const [selection, setSelection] = useState<SourceSelection | null>(null);
   const [session, setSession] = useState<SessionState | null>(null);
   const [activeRun, setActiveRun] = useState<ExperimentRun | null>(null);
-  const [tutorNarration, setTutorNarration] = useState<string>('');
-
-  const [isLoading, setIsLoading] = useState<boolean>(true);
-  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
-  const [isUploading, setIsUploading] = useState<boolean>(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [isStale, setIsStale] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [sourceNotice, setSourceNotice] = useState<string | null>(null);
+  const [activePane, setActivePane] = useState('whiteboard');
+  // StrictMode replays effects; bootstrap must not create duplicate owners or lessons.
+  const didBootstrap = useRef(false);
+  const operationInFlight = useRef(false);
+  const headers = (json = true) => ({ ...(json ? { 'Content-Type': 'application/json' } : {}), 'X-CSRF-Token': csrfToken, 'Idempotency-Key': crypto.randomUUID() });
 
+  async function loadDocument(documentId: string) {
+    const [doc, pages] = await Promise.all([
+      request<DocumentStatus>(`/api/v1/documents/${documentId}`),
+      request<DocumentPageDetail[]>(`/api/v1/documents/${documentId}/pages`),
+    ]);
+    setDocument(doc); setDocPages(pages);
+    return doc;
+  }
+
+  async function refreshSession(sessionId: string, restoreSource = false) {
+    const next = await request<SessionState>(`/api/v1/learning-sessions/${sessionId}`);
+    const run = next.latest_run_id ? await request<ExperimentRun>(`/api/v1/runs/${next.latest_run_id}`) : null;
+    if (restoreSource && next.source_selection) {
+      await loadDocument(next.source_selection.document_id);
+      setSelection(next.source_selection);
+    }
+    setSession(next); setActiveRun(run);
+    return next;
+  }
+
+  async function bootstrap() {
+    try {
+      setIsLoading(true); setErrorMsg(null);
+      const guest = await request<{ csrf_token: string }>('/api/v1/guest-sessions', { method: 'POST' });
+      setCsrfToken(guest.csrf_token);
+      const [owner, active] = await Promise.all([
+        request<Me>('/api/v1/me'),
+        request<{ active_session_id: string | null }>('/api/v1/learning-sessions/active'),
+      ]);
+      setMe(owner);
+      if (active.active_session_id) await refreshSession(active.active_session_id, true);
+    } catch (error) { setErrorMsg(`Could not open your workspace. ${errorMessage(error)}`); }
+    finally { setIsLoading(false); }
+  }
   useEffect(() => {
-    bootstrap();
+    if (!didBootstrap.current) { didBootstrap.current = true; void bootstrap(); }
   }, []);
 
-  const bootstrap = async () => {
-    try {
-      setIsLoading(true);
-      setErrorMsg(null);
-
-      // 1. Establish guest session (or check existing cookie)
-      const guestRes = await fetch('/api/v1/guest-sessions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
-
-      let token = '';
-      if (guestRes.ok) {
-        const guestData = await guestRes.json();
-        token = guestData.csrf_token;
-        setCsrfToken(token);
-      }
-
-      // 2. Fetch /me
-      const meRes = await fetch('/api/v1/me');
-      if (meRes.ok) {
-        const meData = await meRes.json();
-        setMe(meData);
-      }
-
-      // 3. Check for existing active session to resume
-      const activeRes = await fetch('/api/v1/learning-sessions/active');
-      if (activeRes.ok) {
-        const activeData = await activeRes.json();
-        if (activeData.active_session_id) {
-          await refreshSession(activeData.active_session_id);
-          setIsLoading(false);
-          return;
-        }
-      }
-
-      // 4. Initial setup: upload default reference attention note if no active session
-      let docId = '';
-      const sampleBlob = await fetch('/examples/claimlab_attention_lab.pdf').then((r) => {
-        if (!r.ok) return null;
-        return r.blob();
-      });
-
-      if (sampleBlob) {
-        const formData = new FormData();
-        formData.append('file', sampleBlob, 'claimlab_attention_lab.pdf');
-        const uploadRes = await fetch('/api/v1/documents', {
-          method: 'POST',
-          headers: {
-            'X-CSRF-Token': token,
-            'Idempotency-Key': crypto.randomUUID(),
-          },
-          body: formData,
-        });
-        if (uploadRes.ok) {
-          const uploadData = await uploadRes.json();
-          docId = uploadData.document_id;
-        }
-      }
-
-      if (docId) {
-        await loadDocumentAndStartSession(docId, token);
-      } else {
-        // Fallback demo state if running dev server isolated
-        setDocument({
-          document_id: 'doc-attention-ref',
-          filename: 'claimlab_attention_lab.pdf',
-          page_count: 3,
-          status: 'completed',
-          pages: [
-            { page_number: 1, char_count: 502, extraction_status: 'completed', warnings: [] },
-            { page_number: 2, char_count: 489, extraction_status: 'completed', warnings: [] },
-            { page_number: 3, char_count: 462, extraction_status: 'completed', warnings: [] },
-          ],
-          warnings: [],
-        });
-      }
-    } catch (err: any) {
-      console.error('Bootstrap error:', err);
-      setErrorMsg(err.message || 'Initialization failed');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const loadDocumentAndStartSession = async (docId: string, token: string) => {
-    // Fetch document details
-    const docRes = await fetch(`/api/v1/documents/${docId}`);
-    if (docRes.ok) {
-      const docData = await docRes.json();
-      setDocument(docData);
-    }
-
-    // Fetch document pages text and anchors
-    const pagesRes = await fetch(`/api/v1/documents/${docId}/pages`);
-    if (pagesRes.ok) {
-      const pagesData: DocumentPageDetail[] = await pagesRes.json();
-      setDocPages(pagesData);
-    }
-
-    // Create selection on Page 1-2 (Attention Scaling)
-    const selRes = await fetch(`/api/v1/documents/${docId}/selections`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-CSRF-Token': token,
-        'Idempotency-Key': crypto.randomUUID(),
-      },
-      body: JSON.stringify({
-        page_start: 1,
-        page_end: 2,
-        question: 'Why is attention scaled by 1/sqrt(d_k)?',
-      }),
+  async function startLesson(docId: string, pageStart: number, pageEnd: number, question: string) {
+    const source = await request<SourceSelection>(`/api/v1/documents/${docId}/selections`, {
+      method: 'POST', headers: headers(), body: JSON.stringify({ page_start: pageStart, page_end: pageEnd, question }),
     });
-
-    if (selRes.ok) {
-      const selData = await selRes.json();
-      setAnchors(selData.anchors || []);
-
-      // Create initial learning session
-      const sessRes = await fetch('/api/v1/learning-sessions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-CSRF-Token': token,
-          'Idempotency-Key': crypto.randomUUID(),
-        },
-        body: JSON.stringify({
-          selection_id: selData.selection_id,
-          goal: 'Understand attention scaling',
-        }),
-      });
-
-      if (sessRes.ok) {
-        const sessData = await sessRes.json();
-        await refreshSession(sessData.session_id);
-      }
-    }
-  };
-
-  const refreshSession = async (sessionId: string) => {
-    try {
-      const res = await fetch(`/api/v1/learning-sessions/${sessionId}`);
-      if (res.ok) {
-        const data: SessionState = await res.json();
-        setSession(data);
-
-        // Fetch latest run if present
-        if (data.latest_run_id) {
-          const runRes = await fetch(`/api/v1/runs/${data.latest_run_id}`);
-          if (runRes.ok) {
-            const runData = await runRes.json();
-            setActiveRun(runData);
-          }
-        }
-      }
-    } catch (err) {
-      console.error('Error refreshing session:', err);
-    }
-  };
-
-  const handleRunRecipe = async (recipeId: string, parameters: Record<string, any>) => {
-    if (!session) return;
-    try {
-      setIsSubmitting(true);
-      const res = await fetch(`/api/v1/learning-sessions/${session.session_id}/runs`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-CSRF-Token': csrfToken,
-          'Idempotency-Key': crypto.randomUUID(),
-        },
-        body: JSON.stringify({
-          recipe_id: recipeId,
-          parameters: parameters,
-        }),
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        const runRes = await fetch(`/api/v1/runs/${data.run_id}`);
-        if (runRes.ok) {
-          const runData = await runRes.json();
-          setActiveRun(runData);
-        }
-        await refreshSession(session.session_id);
-      } else {
-        const err = await res.json();
-        alert(`Recipe execution error: ${err.error?.message || 'Execution failed'}`);
-      }
-    } catch (err: any) {
-      alert(`Run failed: ${err.message}`);
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handleSubmitAnswer = async (answer: string) => {
-    if (!session || !session.active_task) return;
-    try {
-      setIsSubmitting(true);
-      const res = await fetch(`/api/v1/learning-sessions/${session.session_id}/events`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-CSRF-Token': csrfToken,
-          'Idempotency-Key': crypto.randomUUID(),
-        },
-        body: JSON.stringify({
-          schema_version: 1,
-          event_type: 'explanation_submitted',
-          expected_revision: session.revision,
-          payload: {
-            task_id: session.active_task.task_id,
-            task_variant: session.active_task.task_variant,
-            answer: answer,
-          },
-        }),
-      });
-
-      if (res.ok) {
-        await refreshSession(session.session_id);
-        if (answer.trim() === '3') {
-          setTutorNarration(
-            '[Source] Based on Section B, dividing dot-product score by $\\sqrt{d_k} = \\sqrt{16} = 4$ yields $12 / 4 = 3$.\n' +
-            '[Experiment] Notice how the scaled curve stabilizes score variance near 1.0! Progressing to next variant.'
-          );
-        } else {
-          setTutorNarration(
-            '[Source] Trace the arithmetic: $d_k = 16$, so $\\sqrt{d_k} = 4$. Dividing $12$ by $4$ gives $3$. Try recalculating this step.'
-          );
-        }
-      } else {
-        const err = await res.json();
-        alert(`Submission error: ${err.error?.message || 'Revision conflict'}`);
-      }
-    } catch (err: any) {
-      alert(`Error submitting answer: ${err.message}`);
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handleUploadDocument = async (file: File) => {
-    try {
-      setIsUploading(true);
-      const formData = new FormData();
-      formData.append('file', file, file.name);
-
-      const res = await fetch('/api/v1/documents', {
-        method: 'POST',
-        headers: {
-          'X-CSRF-Token': csrfToken,
-          'Idempotency-Key': crypto.randomUUID(),
-        },
-        body: formData,
-      });
-
-      if (res.ok) {
-        const uploadData = await res.json();
-        await loadDocumentAndStartSession(uploadData.document_id, csrfToken);
-      } else {
-        const err = await res.json();
-        alert(`Upload error: ${err.error?.message || 'Upload failed'}`);
-      }
-    } catch (err: any) {
-      alert(`Upload failed: ${err.message}`);
-    } finally {
-      setIsUploading(false);
-    }
-  };
-
-  const handleResetData = async () => {
-    if (!window.confirm('Reset all your guest data, uploaded documents, and learning sessions?')) {
+    if (source.topic_assessment !== 'supported') {
+      setSourceNotice('This passage is outside the current labs. Choose a passage about softmax, attention scaling, or causal masking, or try the example note.');
       return;
     }
-    try {
-      setIsLoading(true);
-      await fetch('/api/v1/me/data', {
-        method: 'DELETE',
-        headers: {
-          'X-CSRF-Token': csrfToken,
-          'Idempotency-Key': crypto.randomUUID(),
-        },
-      });
-      // Re-bootstrap fresh
-      window.location.reload();
-    } catch (err: any) {
-      alert(`Reset failed: ${err.message}`);
-      setIsLoading(false);
-    }
-  };
-
-  if (isLoading) {
-    return (
-      <div className="loading-screen">
-        <div className="spinner" />
-        <h2>Initializing ClaimLab Workspace...</h2>
-        <p>Connecting to Meta Model API &amp; loading verified numerical recipes</p>
-      </div>
-    );
+    const created = await request<{ session_id: string }>('/api/v1/learning-sessions', {
+      method: 'POST', headers: headers(), body: JSON.stringify({ selection_id: source.selection_id, goal: question }),
+    });
+    await refreshSession(created.session_id);
+    setSelection(source); setSourceNotice(null); setIsStale(false);
   }
+
+  async function withOperation(action: () => Promise<void>) {
+    if (operationInFlight.current) return false;
+    operationInFlight.current = true; setIsSubmitting(true); setErrorMsg(null);
+    try { await action(); return true; } catch (error) { setErrorMsg(errorMessage(error)); return false; }
+    finally { operationInFlight.current = false; setIsSubmitting(false); }
+  }
+
+  async function handleUploadDocument(file: File) {
+    if (isUploading || isSubmitting) return;
+    if (!file.name.toLowerCase().endsWith('.pdf') || file.size > 10 * 1024 * 1024) {
+      setErrorMsg('Choose a PDF smaller than 10 MiB. Scanned pages are not supported yet.'); return;
+    }
+    setIsUploading(true); setErrorMsg(null); setSourceNotice(null);
+    try {
+      const form = new FormData(); form.append('file', file, file.name);
+      const upload = await request<{ document_id: string }>('/api/v1/documents', { method: 'POST', headers: headers(false), body: form });
+      await loadDocument(upload.document_id); setActivePane('source');
+    } catch (error) { setErrorMsg(errorMessage(error)); }
+    finally { setIsUploading(false); }
+  }
+
+  async function handleTryExample() {
+    await withOperation(async () => {
+      const response = await fetch('/examples/claimlab_attention_lab.pdf');
+      if (!response.ok || !(response.headers.get('content-type') || '').includes('pdf')) throw new Error('The example PDF is unavailable. You can upload your own attention note.');
+      const form = new FormData(); form.append('file', await response.blob(), 'claimlab_attention_lab.pdf');
+      const upload = await request<{ document_id: string }>('/api/v1/documents', { method: 'POST', headers: headers(false), body: form });
+      const doc = await loadDocument(upload.document_id);
+      await startLesson(doc.document_id, 1, Math.min(2, doc.page_count), 'Why is attention scaled by 1/sqrt(d_k)?');
+    });
+  }
+
+  async function handleRunRecipe(recipeId: string, parameters: Record<string, unknown>) {
+    if (!session) return;
+    // Failures propagate so the lab keeps its edited inputs and stale marker.
+    if (operationInFlight.current) throw new Error('Please wait for the current step to finish.');
+    operationInFlight.current = true; setIsSubmitting(true); setErrorMsg(null);
+    try {
+      await request(`/api/v1/learning-sessions/${session.session_id}/runs`, { method: 'POST', headers: headers(), body: JSON.stringify({ recipe_id: recipeId, parameters, expected_revision: session.revision }) });
+      await refreshSession(session.session_id);
+    } catch (error) { setErrorMsg(errorMessage(error)); throw error; }
+    finally { operationInFlight.current = false; setIsSubmitting(false); }
+  }
+
+  async function submitEvent(eventType: string, payload: Record<string, unknown>) {
+    if (!session) return false;
+    return withOperation(async () => {
+      try {
+        await request(`/api/v1/learning-sessions/${session.session_id}/events`, {
+          method: 'POST', headers: headers(), body: JSON.stringify({ schema_version: 1, event_id: crypto.randomUUID(), event_type: eventType, expected_revision: session.revision, payload }),
+        });
+      } catch (error) {
+        await refreshSession(session.session_id).catch(() => undefined);
+        throw error;
+      }
+      await refreshSession(session.session_id);
+    });
+  }
+
+  async function handleResetData() {
+    if (!window.confirm('Delete all your uploaded PDFs, extracted text, learning history, and sessions? This cannot be undone.')) return;
+    await withOperation(async () => {
+      await request('/api/v1/me/data', { method: 'DELETE', headers: headers(false) });
+      window.location.reload();
+    });
+  }
+  function navigate(pane: string) {
+    setActivePane(pane);
+    window.document.getElementById(pane)?.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'start' });
+  }
+  const busy = isSubmitting || isUploading || isLoading;
+  const hasLesson = Boolean(session);
+  const sourceMatchesLesson = !selection || selection.document_id === document?.document_id;
 
   return (
     <div className="claimlab-app">
-      {/* Top Navbar */}
-      <header className="navbar">
-        <div className="navbar-brand">
-          <span className="logo-icon">⚡</span>
-          <div className="brand-text">
-            <h1>ClaimLab</h1>
-            <span className="subtitle">Adaptive Whiteboard Teacher &amp; Experimentation Engine</span>
+      <a className="skip-link" href="#whiteboard">Skip to whiteboard</a>
+      <aside className="app-rail" aria-label="Workspace navigation">
+        <a href="#" className="brand-mark" aria-label="ClaimLab home"><Icon name="flask" size={25}/></a>
+        <div className="rail-links">{([{ id: 'source', icon: 'book', label: 'Source' }, { id: 'whiteboard', icon: 'board', label: 'Whiteboard' }, { id: 'experiment', icon: 'flask', label: 'Experiment' }, { id: 'progress', icon: 'chart', label: 'Progress' }] as const).map(item => (
+          <button key={item.id} className={`rail-button ${activePane === item.id ? 'active' : ''}`} aria-label={item.label} title={item.label} aria-current={activePane === item.id ? 'location' : undefined} onClick={() => navigate(item.id)}><Icon name={item.icon}/><span>{item.label}</span></button>
+        ))}</div>
+        <span className="rail-bottom" title="Browser-bound private guest workspace"><Icon name="shield"/></span>
+      </aside>
+      <div className="app-body">
+        <header className="navbar">
+          <div className="navbar-brand"><span className="brand-name">ClaimLab<span className="brand-period">.</span></span><span className="nav-divider"/><span className="nav-location">Learning workspace</span></div>
+          <div className="navbar-status"><span className="saved-status"><span className={`dot ${busy ? 'working' : ''}`}/>{busy ? 'Working on your lesson' : session ? 'Lesson saved' : 'Your space to explore'}</span>
+            <details className="session-menu"><summary><span className="guest-avatar">Y</span><span>Your session</span><Icon name="chevron" size={14}/></summary><div className="session-menu-body"><strong>Private guest workspace</strong><p>History stays in this browser for 24 hours. Clearing its cookie loses access.</p><p>Teaching mode: <strong>{me?.model_mode === 'live' ? 'Live Meta model' : me ? 'Fixture · offline development' : 'Not connected'}</strong></p>{session && <p>Session revision {session.revision}</p>}<p>Delete your uploaded documents and learning history at any time. This also ends the guest session.</p><button className="text-button danger" onClick={handleResetData} disabled={busy || !me}>Delete my data</button></div></details>
           </div>
-        </div>
-
-        <div className="navbar-status">
-          <div className="status-item">
-            <span className="dimmed">Meta Model:</span>
-            <span className="model-tag">muse-spark-1.3</span>
+        </header>
+        <main className="main-content">
+          <div className="workspace-intro"><div><p className="eyebrow"><span className="tiny-line"/> A LITTLE CURIOSITY. A CLEARER PICTURE.</p><h1>{hasLesson ? 'Let’s make attention click.' : 'Big ideas, one clear step at a time.'}</h1><p className="intro-description">Read the source. See the idea. Test it for yourself.</p></div><div className={`mode-label ${me?.model_mode === 'live' ? 'live' : ''}`}><Icon name="spark" size={15}/>{me?.model_mode === 'live' ? 'Live Meta teaching' : me ? 'Fixture mode · offline teaching' : 'Connecting to workspace'}</div></div>
+          {errorMsg && <div className="banner error" role="alert"><Icon name="info"/><span>{errorMsg}</span>{!me && <button className="text-button" onClick={() => void bootstrap()} disabled={isLoading}>Retry connection</button>}<button className="icon-button" onClick={() => setErrorMsg(null)} aria-label="Dismiss error"><Icon name="close" size={16}/></button></div>}
+          <div className="workspace-layout" aria-busy={isLoading}>
+            <section className="col-source" id="source" aria-label="Source material">
+              <SourceViewer document={document} pages={docPages} anchors={sourceMatchesLesson ? selection?.anchors || [] : []} onUploadFile={handleUploadDocument} isUploading={isUploading} disabled={busy || !me} onTryExample={handleTryExample} onStartLesson={async (start, end, question) => { if (document) await withOperation(() => startLesson(document.document_id, start, end, question)); }} notice={sourceNotice || (!sourceMatchesLesson ? 'This is a new source. Explore a question to replace the current lesson on the board.' : null)} selectedRange={sourceMatchesLesson ? selection : null}/>
+              <div className="learning-path"><p className="eyebrow">THE LEARNING LOOP</p><div className={document ? 'path-step complete' : 'path-step'}><span>01</span><div><strong>Start with the source</strong><p>A passage. A question. A starting point.</p></div></div><div className={hasLesson ? 'path-step complete' : 'path-step'}><span>02</span><div><strong>See it & experiment</strong><p>Connect the picture to real numbers.</p></div></div><div className={Object.values(session?.evidence_summary || {}).some(state => state !== 'introduced' && state !== 'not_assessed') ? 'path-step complete' : 'path-step'}><span>03</span><div><strong>Make it your own</strong><p>Your answers shape the next step.</p></div></div></div>
+            </section>
+            <section className="col-center" id="whiteboard" aria-label="Shared whiteboard" tabIndex={-1}>
+              {selection && <div className="lesson-context"><span className="eyebrow">THE QUESTION WE’RE EXPLORING <span>· PAGES {selection.page_start}–{selection.page_end}</span></span><p>{selection.question}</p></div>}
+              {!hasLesson ? <div className="welcome-board"><div className="welcome-board-header"><Icon name="board" size={17}/><span>Your shared whiteboard</span><span className="paper-badge">A space to think</span></div><div className="welcome-content"><div className="welcome-symbol"><Icon name="spark" size={35}/></div><span className="eyebrow">FROM “WHAT?” TO “AHA.”</span><h2>Don’t just read it.<br/><em>Reason through it.</em></h2><p>Bring a question about attention. We’ll draw the connections, try a small experiment, and work through what you notice.</p><button className="primary-button" disabled={busy || !me} onClick={handleTryExample}>{isLoading ? 'Opening your workspace…' : isSubmitting ? 'Preparing your lesson…' : 'Try the example lesson'}<Icon name="arrow" size={18}/></button><span className="welcome-caption">A short attention note · no upload needed</span></div><div className="welcome-footer"><span><Icon name="book" size={15}/> Source grounded</span><span><Icon name="flask" size={15}/> Real calculations</span><span><Icon name="chart" size={15}/> Learns from your work</span></div></div> : <Whiteboard key={'board-' + session!.session_id} scene={session!.board} activeRun={activeRun} isStale={isStale}/>}
+              <TaskCard key={'task-' + (session?.session_id || 'empty') + '-' + (session?.active_task ? `${session.active_task.task_id}-${session.active_task.task_variant}` : 'none')} task={session?.active_task || null} onSubmitAnswer={answer => submitEvent('explanation_submitted', { task_id: session?.active_task?.task_id, task_variant: session?.active_task?.task_variant, answer })} onAskQuestion={message => submitEvent('message_submitted', { message })} onRequestHint={() => submitEvent('hint_requested', { task_id: session?.active_task?.task_id, task_variant: session?.active_task?.task_variant })} isLoading={busy} tutorNarration={session?.tutor_narration || ''} hasSession={hasLesson}/>
+            </section>
+            <section className="col-right" aria-label="Experiment and learning progress"><div id="experiment"><ExperimentPanel activeRun={activeRun} onRunRecipe={handleRunRecipe} isLoading={busy} disabled={!hasLesson} onStaleChange={setIsStale}/></div><div id="progress"><EvidencePanel evidenceSummary={session?.evidence_summary || {}}/></div></section>
           </div>
-          <div className="status-item">
-            <span className="dimmed">Mode:</span>
-            <span className={`badge ${me?.model_mode === 'live' ? 'success' : 'info'}`}>
-              {me?.model_mode === 'live' ? 'live' : 'fixture'}
-            </span>
-          </div>
-          {session && (
-            <div className="status-item">
-              <span className="dimmed">Session Rev:</span>
-              <span className="badge primary">#{session.revision}</span>
-            </div>
-          )}
-          <button
-            type="button"
-            className="reset-btn"
-            title="Purge session data per privacy contract"
-            onClick={handleResetData}
-          >
-            Clear Data
-          </button>
-        </div>
-      </header>
-
-      {errorMsg && (
-        <div className="banner error">
-          <span>⚠️ {errorMsg}</span>
-        </div>
-      )}
-
-      {/* Main Workspace Layout */}
-      <main className="workspace-layout">
-        {/* Left Column: Source Grounding */}
-        <section className="col-source">
-          <SourceViewer
-            document={document}
-            pages={docPages}
-            anchors={anchors}
-            onUploadFile={handleUploadDocument}
-            isUploading={isUploading}
-          />
-        </section>
-
-        {/* Center Column: Whiteboard & Task Interaction */}
-        <section className="col-center">
-          <Whiteboard
-            scene={session?.board || { schema_version: 1, board_revision: 0, objects: [] }}
-            activeRun={activeRun}
-          />
-
-          <TaskCard
-            task={session?.active_task || null}
-            onSubmitAnswer={handleSubmitAnswer}
-            isLoading={isSubmitting}
-            tutorNarration={tutorNarration}
-          />
-        </section>
-
-        {/* Right Column: Experiment Lab & Evidence */}
-        <section className="col-right">
-          <ExperimentPanel
-            activeRun={activeRun}
-            onRunRecipe={handleRunRecipe}
-            isLoading={isSubmitting}
-          />
-
-          <EvidencePanel
-            evidenceSummary={session?.evidence_summary || {}}
-          />
-        </section>
-      </main>
+          <footer className="workspace-footer"><span>Built for understanding, with room for questions.</span><span><Icon name="shield" size={13}/> Private by default · 24-hour guest history</span></footer>
+        </main>
+      </div>
     </div>
   );
-};
-
-export default App;
+}

@@ -24,7 +24,7 @@ def generate_guest_credential() -> Tuple[str, str, str, str]:
     """Generates (raw_cookie_token, cookie_hash, raw_csrf_token, csrf_hash)."""
     raw_cookie = secrets.token_urlsafe(32)
     cookie_hash = hash_token(raw_cookie)
-    raw_csrf = secrets.token_urlsafe(32)
+    raw_csrf = hash_token(f"csrf:{raw_cookie}")
     csrf_hash = hash_token(raw_csrf)
     return raw_cookie, cookie_hash, raw_csrf, csrf_hash
 

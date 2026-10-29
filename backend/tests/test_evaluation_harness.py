@@ -7,7 +7,8 @@ def test_claimlab_official_evaluation_benchmark_all_12_cases(monkeypatch):
     """Runs all 12 behavioral evaluation cases from docs/12_EVALUATION_HARNESS.md.
 
     Verifies 100% pass rate across numerical proofs, pedagogical adaptation,
-    topic boundaries, prompt injection defense, and privacy purge lifecycle.
+    topic boundaries, prompt injection defense, and guest revocation.
+    This benchmark does not establish complete database content erasure.
     """
     monkeypatch.setattr(settings, "MODEL_MODE", "fixture")
     evaluator = ClaimLabEvaluator()

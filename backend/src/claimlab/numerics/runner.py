@@ -26,6 +26,17 @@ def compute_parameter_hash(recipe_id: str, params: Dict[str, Any]) -> str:
     return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 
 
+def serialize_run_evidence(run: ExperimentRunResponse) -> str:
+    """Retain execution metadata with checks without changing the database schema."""
+    return json.dumps({
+        "schema_version": 1,
+        "checks": [check.model_dump() for check in run.checks],
+        "assumptions": run.assumptions,
+        "runner_digest": run.runner_digest,
+        "numpy_version": run.numpy_version,
+    })
+
+
 class NumericalRunner:
     """Executes reviewed numerical recipes under validated bounds."""
 
@@ -34,9 +45,7 @@ class NumericalRunner:
 
     def run(self, recipe_id: str, parameters: Dict[str, Any]) -> ExperimentRunResponse:
         started_at = datetime.now(timezone.utc).isoformat()
-        param_hash = compute_parameter_hash(recipe_id, parameters)
         run_id = str(uuid.uuid4())
-        seed = int(parameters.get("seed", 42))
 
         assumptions: list[str] = []
 
@@ -74,13 +83,14 @@ class NumericalRunner:
 
         completed_at = datetime.now(timezone.utc).isoformat()
         all_passed = all(c.status in ("passed", "not_applicable") for c in checks)
+        canonical_parameters = validated_params.model_dump()
 
         return ExperimentRunResponse(
             run_id=run_id,
             recipe_id=RecipeId(recipe_id),
-            parameters=parameters,
-            parameter_hash=param_hash,
-            seed=seed,
+            parameters=canonical_parameters,
+            parameter_hash=compute_parameter_hash(recipe_id, canonical_parameters),
+            seed=validated_params.seed,
             status="succeeded" if all_passed else "failed",
             output=output_dict,
             checks=checks,

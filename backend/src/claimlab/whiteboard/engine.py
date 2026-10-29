@@ -90,6 +90,8 @@ def apply_atomic_patch(current_scene: SceneGraph, patch: BoardPatch) -> SceneGra
                 raise WhiteboardValidationError(f"Scene cannot exceed {MAX_BOARD_OBJECTS} objects")
 
             validate_safe_text(new_obj.label, "label")
+            if "text" in new_obj.payload:
+                validate_safe_text(str(new_obj.payload["text"]), "text")
             if new_obj.type == ObjectType.EQUATION:
                 latex = new_obj.payload.get("latex", "")
                 validate_safe_latex(latex)

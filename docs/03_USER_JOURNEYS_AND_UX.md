@@ -2,9 +2,11 @@
 
 ## Workspace
 
-Desktop: a source panel, a central shared whiteboard, and a compact teacher/experiment panel. These are synchronized views of one session. At narrow widths, use accessible tabs for Source, Board, Lab, and History; keep active concept and run status visible. Target 360–1440 CSS pixels, with core reading usable at 320 pixels.
+Desktop: a source panel, a central shared whiteboard with tutor interaction, and an experiment/learning-trail column. These are synchronized views of one session. At narrow widths, stack the sections and provide labelled bottom navigation to Source, Whiteboard, Experiment, and Progress. These buttons scroll to the corresponding section and respect reduced motion. Target 360–1440 CSS pixels, with core reading usable at 320 pixels.
 
-The first screen explains the supported topic and accepts a PDF. Avoid a large dashboard of empty metrics. Show a seeded author-created example as an alternative to upload, with its provenance.
+The first screen explains the supported topic and accepts a PDF. The author-created example starts only after an explicit action; opening the app does not upload a document or start a model call. Never fabricate source text when the API or example is unavailable. Use a light paper-and-green visual system, readable source text, visible focus, and a dedicated central teaching surface. Secondary implementation details belong in expandable evidence/session views.
+
+Uploaded PDFs use their actual page count. The student edits a focused question and a range of at most five pages before starting a lesson. Opening a different PDF keeps the previous lesson intact and explicitly labels the new source as a draft until a new lesson succeeds. Unrelated passages receive a supported-topic boundary.
 
 ## Journey A — First lesson
 
@@ -33,6 +35,8 @@ The feedback identifies an observable issue, offers a tentative interpretation, 
 ## Journey E — Resume or delete
 
 Reload restores committed state for the same owner. Explain that clearing the guest cookie loses access to that history; account recovery is outside scope. “Delete my data” removes the owner's content and invalidates work in progress. It is an ordinary product action with a clear consequence, not a hidden administrative process.
+
+**Implementation status, 29 October 2026:** reload restores the owner, selected source, narration, board, task, evidence, and retained run. The delete action revokes access, removes the owner's PDF files, and erases their extracted text and learning records from the database, keeping only a content-free deletion receipt (backend regression `test_delete_erases_all_owner_content_and_preserves_another_owner`). The retention sweeper for expired guests (T-DATA-02) and hosted/backup erasure are not verified, so P0-16 is not yet complete.
 
 ## Interaction design
 

@@ -13,6 +13,33 @@ from claimlab.models import (
 from claimlab.learning.task_bank import TASK_REGISTRY, RubricEvaluation, evaluate_task_submission
 
 
+def recorded_assistance_count(
+    db: Session, session_id: str, event: LearnerEvent, task_id: str, variant_id: str,
+) -> int:
+    """Derive help from server-attributed events and earlier checked feedback."""
+    prior_errors = db.query(TaskAttempt).join(
+        LearnerEvent, LearnerEvent.id == TaskAttempt.learner_event_id,
+    ).filter(
+        TaskAttempt.session_id == session_id,
+        TaskAttempt.task_id == task_id,
+        TaskAttempt.task_variant == variant_id,
+        TaskAttempt.is_correct.is_(False),
+        LearnerEvent.sequence < event.sequence,
+    ).count()
+    help_events = db.query(LearnerEvent).filter(
+        LearnerEvent.session_id == session_id,
+        LearnerEvent.sequence < event.sequence,
+        LearnerEvent.event_type.in_(("hint_requested", "message_submitted", "object_question_submitted")),
+    ).all()
+    task_help = 0
+    for help_event in help_events:
+        payload = json.loads(help_event.payload_json)
+        attribution = payload.get("assistance_task", {})
+        if payload.get("assistance_delivered") is True and attribution.get("task_id") == task_id and attribution.get("task_variant") == variant_id:
+            task_help += 1
+    return prior_errors + task_help
+
+
 def update_evidence_and_decide(
     db: Session,
     session_id: str,
@@ -20,11 +47,11 @@ def update_evidence_and_decide(
     task_id: str,
     variant_id: str,
     answer_raw: Any,
-    hints_used: int = 0,
 ) -> Tuple[ConceptEvidence, TeachingDecision, Optional[Dict[str, Any]]]:
     """
     Applies the 2-variant progression policy and records deterministic teaching decisions.
     """
+    hints_used = recorded_assistance_count(db, session_id, event, task_id, variant_id)
     eval_result: RubricEvaluation = evaluate_task_submission(task_id, variant_id, answer_raw, hints_used)
     task_def = TASK_REGISTRY.get((task_id, variant_id))
     concept_id = task_def.concept_id if task_def else "attention_scaling"
@@ -56,6 +83,7 @@ def update_evidence_and_decide(
             TaskAttempt.session_id == session_id,
             TaskAttempt.task_id == task_id,
             TaskAttempt.is_correct.is_(True),
+            TaskAttempt.hint_count == 0,
         )
         .all()
     )
@@ -65,7 +93,7 @@ def update_evidence_and_decide(
     if eval_result.is_correct:
         if hints_used > 0:
             category = EvidenceCategory.SUPPORTED_WITH_HELP
-            rationale = f"Student answered correctly using {hints_used} hint(s) on variant {variant_id}."
+            rationale = f"Student answered correctly after {hints_used} recorded help or feedback interaction(s) on variant {variant_id}."
         elif distinct_successful_variants >= 2:
             category = EvidenceCategory.SUPPORTED_INDEPENDENTLY
             rationale = f"Student independently solved 2 distinct application variants ({distinct_successful_variants} confirmed)."

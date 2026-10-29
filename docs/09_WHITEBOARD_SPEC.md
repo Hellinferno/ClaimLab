@@ -50,6 +50,10 @@ Fit content to the available pane, with labelled zoom/pan only when necessary. A
 
 KaTeX is rendered with unsafe trusted extensions disabled. Render plain text through framework escaping. Source PDF scripts and attachments are never executed as teaching content.
 
+The implemented board provides Fit and Readable size controls. Readable size uses the scene's native width inside an independently scrolling pane; it must not widen the page. Equations fit to their measured rendered width after fonts load, with left-safe scrolling if the minimum readable size cannot fit. Node previews use bounded text; selecting them exposes the complete description. Chart text summaries provide the exact retained values.
+
+Plot references render only their referenced retained run and allowlisted output field. Selecting an older plot loads that owner-checked run on demand. A newer lab run appears separately when the board still references an earlier run. Variance series use one shared vertical scale and actual dimension spacing; bars and masks use the retained array/matrix size without example-value fallbacks.
+
 ## Required checks
 
 Atomic rejection, duplicate IDs, dangling connectors, stale bases, excessive objects/commands, malformed LaTeX, malicious text, reduced-motion behavior, keyboard connection tasks, and run-to-chart consistency. Visual polish must not hide failed state validation.

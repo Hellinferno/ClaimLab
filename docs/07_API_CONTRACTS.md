@@ -6,6 +6,8 @@
 
 `POST /guest-sessions` creates an opaque guest cookie with `HttpOnly`, `Secure` in HTTPS environments, and `SameSite=Lax`; return a CSRF token in JSON. Require a same-origin `Origin` and JSON content type for this bootstrap. Mutating authenticated calls require an allowed Origin and CSRF header. Local development uses an explicitly configured loopback origin; no wildcard credentialed CORS.
 
+Reload/bootstrap reuses an existing unexpired, non-deleted guest rather than replacing it. The returned CSRF token remains stable for that cookie across tabs, and the cookie lifetime is bounded by the original owner expiry. A bootstrap without a valid cookie creates a new owner.
+
 Every private endpoint checks owner and expiry, including file, job, event stream, and result endpoints. Return a consistent `404 RESOURCE_NOT_FOUND` for another owner's resource. Ownership comes from the cookie, never a client `owner_id` field.
 
 State-changing session requests include `expected_revision`; meaningful authenticated create/mutation calls require `Idempotency-Key`. Reuse with the same fingerprint returns the original result. Reuse with different input returns `409 IDEMPOTENCY_CONFLICT`. Guest bootstrap is the explicit exception because no owner identity exists yet.
@@ -19,9 +21,11 @@ State-changing session requests include `expected_revision`; meaningful authenti
 | DELETE `/me/data` | CSRF; idempotency key | 202 deletion ID; guest invalidated immediately |
 | POST `/documents` | Multipart PDF; idempotency key | 202 document ID and parsing job ID |
 | GET `/documents/{id}` | Owner cookie | 200 status, ordered page metadata, extraction warnings |
+| GET `/documents/{id}/pages` | Owner cookie | 200 ordered extracted page text and source anchors |
 | GET `/documents/{id}/file` | Owner cookie | 200 PDF bytes, private/no-store headers |
 | POST `/documents/{id}/selections` | Page range and question | 201 immutable selection, supported-topic assessment |
 | POST `/learning-sessions` | Selection ID, goal, preferences | 202 session ID, revision, initial tutor job ID |
+| GET `/learning-sessions/active` | Owner cookie | 200 latest session ID, or null |
 | GET `/learning-sessions/{id}` | Owner cookie | 200 committed snapshot, evidence summary, active job |
 | POST `/learning-sessions/{id}/events` | Typed learner event envelope | 202 accepted event, current revision, tutor job ID |
 | POST `/learning-sessions/{id}/runs` | Recipe parameters, expected revision | 202 run ID, current revision, job ID |
@@ -33,6 +37,26 @@ State-changing session requests include `expected_revision`; meaningful authenti
 | GET `/health/ready` | Public | 200/503 dependencies ready; no secret values |
 
 All writes validate length, content, owner quotas, and active-session fences on the server. Client-side rate limits are supplementary.
+
+### Current workspace snapshot and compatibility (28 October 2026)
+
+`SessionStateResponse` adds nullable `source_selection` (the existing `SourceSelectionResponse`, including document ID, selected pages, question, and anchors) and nullable `tutor_narration` (the latest retained completed teaching narration). The frontend fetches the corresponding owner-checked document/page endpoints and exact `latest_run_id` when restoring a session.
+
+Learner-event idempotency fingerprints include the full event envelope. An identical retry returns the original response before revision validation; a changed answer with the same key conflicts. Structured answer events must refer to the current task and variant. A `message_submitted` question is not graded as an arithmetic answer. Failed live tutor calls return 503, release the matching job lock, and do not substitute fixture teaching. The UI refreshes the retained session after an event failure and preserves the question draft.
+
+Run requests from the workspace always supply `expected_revision`; the current endpoint checks this field when supplied and retains omission support for older callers. Returned job IDs now resolve to retained job records. Numerical parameters are stored after schema validation, including defaults; their hash describes those exact retained inputs. Execution assumptions, runner identity, and NumPy version are retained with a versioned check envelope. Older records without metadata return `not recorded` rather than invented values.
+
+The current tutor and recipe routes still execute synchronously before returning their 202 response. Upload parsing runs in the request thread pool rather than blocking the async event loop. This is not evidence of the fully isolated durable-worker architecture; that remains a release gap.
+
+### Quota, failure, and lock behavior (29 October 2026)
+
+- `POST /documents` with bytes the owner has already uploaded (same SHA-256) returns the existing document ID and its parsing job ID with 202. It does not create a document or consume the 3-document quota.
+- If the initial tutor turn of `POST /learning-sessions` fails (503), the session is removed: it consumes no session quota and is never returned by `/learning-sessions/active`. The failed tutor job is kept as the record of the attempt.
+- In live mode, an answer event is graded only after the provider turn succeeds. A failed turn records no task attempt or evidence, and the learner's retry is graded once. The budget reservation of a failed provider call is marked `released`.
+- Questions and other non-answer events keep the current task and variant unless the tutor sets a new one; a hint never changes it.
+- API tutor jobs carry a lease (`lease_expires_at`, 180 s). Events and runs return `409 SESSION_BUSY` only while the session's job is queued or running within its lease. A job past its lease is marked failed (`WORKER_LOST`) and its session lock released.
+- Quota rejections (`422 PARAMETERS_INVALID`) tell the learner that **Delete my data** resets the guest workspace.
+- Live `present_teaching_step` board commands are short notes `{action: "add_text", label, text}`; the server converts them into validated `text` objects. Patch-protocol commands (`op`) remain accepted. Other shapes are ignored and logged by action name only.
 
 ## Create a selection
 

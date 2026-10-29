@@ -48,7 +48,7 @@ Store secrets in a local ignored environment file or the host's secret manager. 
 The backend package must be installed before these module commands are available:
 
 ```bash
-python -m uvicorn claimlab.api:app --host 127.0.0.1 --port 8000 --reload
+python -m uvicorn claimlab.api:app --host 127.0.0.1 --port 8080 --reload
 python -m claimlab.worker
 npm --prefix frontend run dev -- --host 127.0.0.1
 ```

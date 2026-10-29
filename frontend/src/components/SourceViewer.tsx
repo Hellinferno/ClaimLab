@@ -1,165 +1,53 @@
-import React, { useState } from 'react';
-import type { DocumentStatus, SourceAnchor, DocumentPageDetail } from '../types';
+import { useRef, useState } from 'react';
+import type { DocumentStatus, SourceAnchor, DocumentPageDetail, SourceSelection } from '../types';
+import { Icon } from './Icon';
 
 interface SourceViewerProps {
   document: DocumentStatus | null;
-  pages?: DocumentPageDetail[];
+  pages: DocumentPageDetail[];
   anchors: SourceAnchor[];
-  onSelectAnchor?: (anchor: SourceAnchor) => void;
-  selectedAnchorId?: string | null;
-  onUploadFile?: (file: File) => Promise<void>;
-  isUploading?: boolean;
+  onUploadFile: (file: File) => Promise<void>;
+  onTryExample: () => Promise<void>;
+  onStartLesson: (start: number, end: number, question: string) => Promise<void>;
+  isUploading: boolean;
+  disabled: boolean;
+  notice?: string | null;
+  selectedRange?: SourceSelection | null;
 }
 
-export const SourceViewer: React.FC<SourceViewerProps> = ({
-  document,
-  pages = [],
-  anchors,
-  onSelectAnchor,
-  selectedAnchorId,
-  onUploadFile,
-  isUploading = false,
-}) => {
-  const [activePageNum, setActivePageNum] = useState<number>(2); // Default to Page 2 (Attention Scaling)
+export function SourceViewer(props: SourceViewerProps) {
+  return <SourceContent key={(props.document?.document_id || 'empty') + '-' + (props.selectedRange?.selection_id || 'draft')} {...props}/>;
+}
 
-  const currentPageDetail = pages.find((p) => p.page_number === activePageNum);
-  const pageAnchors = anchors.filter((a) => a.page_number === activePageNum);
+function SourceContent({ document, pages, anchors, onUploadFile, onTryExample, onStartLesson, isUploading, disabled, notice, selectedRange }: SourceViewerProps) {
+  const fileInput = useRef<HTMLInputElement>(null);
+  const [pageNumber, setPageNumber] = useState(selectedRange?.page_start || 1);
+  const [start, setStart] = useState(selectedRange?.page_start || 1);
+  const [end, setEnd] = useState(selectedRange?.page_end || Math.min(2, document?.page_count || 1));
+  const [question, setQuestion] = useState(selectedRange?.question || 'Why is attention scaled by 1/sqrt(d_k)?');
+  const [selectedAnchor, setSelectedAnchor] = useState<string | null>(null);
+  const currentPage = pages.find(page => page.page_number === pageNumber);
+  const pageAnchors = anchors.filter(anchor => anchor.page_number === pageNumber);
+  const draftChanged = !selectedRange || start !== selectedRange.page_start || end !== selectedRange.page_end || question !== selectedRange.question;
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0] && onUploadFile) {
-      await onUploadFile(e.target.files[0]);
-    }
-  };
-
-  return (
-    <div className="panel source-panel">
-      <div className="panel-header">
-        <div className="title-row">
-          <span className="icon">📄</span>
-          <h3>Source Grounding</h3>
-        </div>
-        <div className="source-actions">
-          {document && (
-            <span className="badge success">
-              {document.filename} ({document.page_count}p)
-            </span>
-          )}
-          <label className="upload-btn" title="Upload custom PDF document">
-            <span>{isUploading ? 'Uploading...' : '📁 Upload PDF'}</span>
-            <input
-              type="file"
-              accept=".pdf"
-              onChange={handleFileChange}
-              disabled={isUploading}
-              style={{ display: 'none' }}
-            />
-          </label>
-        </div>
-      </div>
-
-      {/* Page Tabs */}
-      <div className="page-tabs">
-        {[1, 2, 3].map((num) => (
-          <button
-            key={num}
-            className={`page-tab ${activePageNum === num ? 'active' : ''}`}
-            onClick={() => setActivePageNum(num)}
-          >
-            Page {num}: {num === 1 ? 'Softmax' : num === 2 ? 'Attention' : 'Causal'}
-          </button>
-        ))}
-      </div>
-
-      {/* Page Content & Anchors */}
-      <div className="source-content">
-        <div className="section-summary">
-          {currentPageDetail?.normalized_text ? (
-            <div className="source-body">
-              <h4>Extracted Document Text (Page {activePageNum})</h4>
-              <p className="extracted-text">{currentPageDetail.normalized_text}</p>
-            </div>
-          ) : (
-            <div className="source-body">
-              {activePageNum === 1 && (
-                <>
-                  <h4>Section A: From scores to weights</h4>
-                  <p>
-                    Softmax turns a finite vector of scores into nonnegative weights summing to one.
-                    Increasing all scores by the same amount preserves the weights. Multiplying unequal scores
-                    changes their relative influence. Equal scores receive equal weights.
-                  </p>
-                  <p>
-                    A numerical investigation can compare score vectors before and after multiplication.
-                    Its inputs and results should be visible so the learner can explain the relationship
-                    rather than memorize a picture.
-                  </p>
-                </>
-              )}
-
-              {activePageNum === 2 && (
-                <>
-                  <h4>Section B: Attention ingredients</h4>
-                  <p>
-                    In a small attention example, a query is compared with keys to produce scores.
-                    A normalization step produces weights. Those weights combine values to produce an output.
-                    The objects participating in scoring and those contributing output information have different roles.
-                  </p>
-                  <p>
-                    A synthetic dot-product experiment can investigate the effect of score scaling under stated
-                    assumptions. Synthetic vectors do not represent a trained model's learned behavior or
-                    reproduce a translation benchmark.
-                  </p>
-                </>
-              )}
-
-              {activePageNum === 3 && (
-                <>
-                  <h4>Section C: Which positions may contribute?</h4>
-                  <p>
-                    In a causal attention illustration, a position can use its current and earlier positions
-                    while future positions are excluded. A mask changes which entries contribute before
-                    row-wise normalization. Each row in this example retains at least one allowed entry.
-                  </p>
-                  <p>
-                    This explains one operation. A full language-model training procedure includes additional
-                    design choices and should not be inferred from the illustration alone.
-                  </p>
-                </>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Grounding Anchors List */}
-        <div className="anchors-container">
-          <div className="anchors-header">
-            <h5>Verified Grounding Anchors (Page {activePageNum})</h5>
-            <span className="anchor-count">{pageAnchors.length} anchors</span>
-          </div>
-
-          {pageAnchors.length === 0 ? (
-            <p className="dimmed">No active anchors on page {activePageNum}.</p>
-          ) : (
-            <div className="anchors-list">
-              {pageAnchors.map((anc) => (
-                <div
-                  key={anc.id}
-                  className={`anchor-item ${selectedAnchorId === anc.id ? 'selected' : ''}`}
-                  onClick={() => onSelectAnchor?.(anc)}
-                >
-                  <div className="anchor-tag-row">
-                    <span className="anchor-tag">#{anc.id}</span>
-                    <span className="anchor-offsets">
-                      chars {anc.start_offset}&ndash;{anc.end_offset}
-                    </span>
-                  </div>
-                  <p className="anchor-quote">&ldquo;{anc.quote}&rdquo;</p>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-};
+  return <div className="panel source-panel">
+    <div className="panel-header"><div className="title-row"><Icon name="book" size={17}/><h2>Your source</h2></div><span className="panel-number">01</span></div>
+    <input ref={fileInput} className="visually-hidden" type="file" accept=".pdf,application/pdf" aria-label="Upload PDF" disabled={disabled} onChange={async event => {
+      const file = event.currentTarget.files?.[0]; event.currentTarget.value = ''; if (file) await onUploadFile(file);
+    }}/>
+    {document ? <>
+      <div className="document-card"><div className="document-icon">PDF</div><div><strong title={document.filename}>{document.filename}</strong><span>{document.page_count} {document.page_count === 1 ? 'page' : 'pages'} · {document.status === 'completed' ? 'Text extracted' : document.status}</span></div><button className="icon-button" title="Upload another PDF" aria-label="Upload another PDF" disabled={disabled} onClick={() => fileInput.current?.click()}><Icon name="upload" size={16}/></button></div>
+      {!!document.warnings.length && <p className="source-warning" role="status">{document.warnings.join(' ')}</p>}
+      <div className="source-reader-heading"><span className="eyebrow">THE ORIGINAL PASSAGE</span><select aria-label="Source page" value={pageNumber} onChange={event => { setPageNumber(Number(event.target.value)); setSelectedAnchor(null); }}>{pages.map(page => <option key={page.page_number} value={page.page_number}>Page {page.page_number}</option>)}</select></div>
+      <div className="source-paper"><span className="source-page-number">PAGE {pageNumber.toString().padStart(2, '0')}</span>{currentPage?.normalized_text ? <p className="extracted-text">{currentPage.normalized_text}</p> : <p className="muted">This page has no readable text. Choose a page with native text or upload another PDF.</p>}</div>
+      {pageAnchors.length > 0 && <details className="source-anchors"><summary>{pageAnchors.length} source {pageAnchors.length === 1 ? 'anchor' : 'anchors'} <Icon name="chevron" size={13}/></summary><div className="anchors-list">{pageAnchors.map(anchor => <button key={anchor.id} className={'anchor-item ' + (selectedAnchor === anchor.id ? 'selected' : '')} onClick={() => setSelectedAnchor(selectedAnchor === anchor.id ? null : anchor.id)} aria-expanded={selectedAnchor === anchor.id}><span className="eyebrow">SOURCE · PAGE {anchor.page_number}</span><q>{anchor.quote}</q>{selectedAnchor === anchor.id && <code>Characters {anchor.start_offset}–{anchor.end_offset} · {anchor.id}</code>}</button>)}</div></details>}
+      <form className="lesson-form" onSubmit={async event => { event.preventDefault(); await onStartLesson(start, end, question.trim()); }}>
+        <label htmlFor="learning-question">What would you like to understand?</label><textarea id="learning-question" value={question} onChange={event => setQuestion(event.target.value)} maxLength={1000} rows={3} disabled={disabled} required/>
+        <div className="form-row page-range"><div className="form-group"><label htmlFor="page-start">From page</label><input id="page-start" type="number" min={1} max={document.page_count} value={start} onChange={event => setStart(Number(event.target.value))} disabled={disabled} required/></div><span>—</span><div className="form-group"><label htmlFor="page-end">To page</label><input id="page-end" type="number" min={start} max={Math.min(document.page_count, start + 4)} value={end} onChange={event => setEnd(Number(event.target.value))} disabled={disabled} required/></div></div>
+        <button className={draftChanged ? 'secondary-button' : 'text-button lesson-current'} type="submit" disabled={disabled || !question.trim() || !Number.isInteger(start) || !Number.isInteger(end) || end < start || end - start > 4 || !draftChanged}>{draftChanged ? 'Explore this question' : 'Current lesson'}<Icon name={draftChanged ? 'arrow' : 'check'} size={15}/></button>
+      </form>
+      {notice && <div className="info-box source-warning" role="status">{notice}</div>}
+    </> : <><div className="upload-zone"><div className="upload-symbol"><Icon name="book" size={27}/></div><h3>Start with a question.</h3><p>Add a paper or note you’d like to understand a little better.</p><button className="secondary-button" onClick={() => fileInput.current?.click()} disabled={disabled}><Icon name="upload" size={15}/>{isUploading ? 'Reading your PDF…' : 'Upload a PDF'}</button><span>Native-text PDF · up to 10 MiB</span></div><div className="example-note"><span className="eyebrow">A GOOD PLACE TO START</span><strong>Attention, made tangible</strong><p>A short note exploring scores, scaling, and causal masks.</p><button className="text-button" onClick={onTryExample} disabled={disabled}>Open example lesson <Icon name="arrow" size={15}/></button></div></>}
+    <div className="source-footnote"><Icon name="shield" size={13}/><span>Your file stays private to this session.</span></div>
+  </div>;
+}

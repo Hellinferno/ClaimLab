@@ -116,6 +116,8 @@ export interface SessionState {
   evidence_summary: Record<string, EvidenceCategory>;
   active_task?: ActiveTask | null;
   latest_run_id?: string | null;
+  source_selection?: SourceSelection | null;
+  tutor_narration?: string | null;
 }
 
 export interface CheckResult {
