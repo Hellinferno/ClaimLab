@@ -24,7 +24,7 @@ function SourceContent({ document, pages, anchors, onUploadFile, onTryExample, o
   const [pageNumber, setPageNumber] = useState(selectedRange?.page_start || 1);
   const [start, setStart] = useState(selectedRange?.page_start || 1);
   const [end, setEnd] = useState(selectedRange?.page_end || Math.min(2, document?.page_count || 1));
-  const [question, setQuestion] = useState(selectedRange?.question || 'Why is attention scaled by 1/sqrt(d_k)?');
+  const [question, setQuestion] = useState(selectedRange?.question || 'What is the main idea here, and why does it work?');
   const [selectedAnchor, setSelectedAnchor] = useState<string | null>(null);
   const currentPage = pages.find(page => page.page_number === pageNumber);
   const pageAnchors = anchors.filter(anchor => anchor.page_number === pageNumber);

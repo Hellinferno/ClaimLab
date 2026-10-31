@@ -16,6 +16,7 @@ class MeResponse(StrictModel):
     expires_at: str
     model_mode: str
     limits: Dict[str, Any]
+    web_research: bool = False
 
 
 class DeleteDataResponse(StrictModel):

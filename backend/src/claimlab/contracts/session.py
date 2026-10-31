@@ -1,5 +1,5 @@
 """Contracts for learning sessions and learner event submissions."""
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import Field
 import uuid
 from claimlab.contracts.common import StrictModel, EvidenceCategory
@@ -44,3 +44,8 @@ class SessionStateResponse(StrictModel):
     latest_run_id: Optional[str] = None
     source_selection: Optional[SourceSelectionResponse] = None
     tutor_narration: Optional[str] = None
+    # Paged lesson for the latest turn: [{title, body, tag, object_ids, anchor_id?, url?}]
+    tutor_steps: List[Dict[str, Any]] = Field(default_factory=list)
+    tutor_turn: Optional[str] = None
+    web_sources: List[Dict[str, str]] = Field(default_factory=list)
+    lesson_kind: str = "attention_lab"

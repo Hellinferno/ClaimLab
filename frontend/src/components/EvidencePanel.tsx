@@ -4,6 +4,7 @@ import { Icon } from './Icon';
 
 interface EvidencePanelProps {
   evidenceSummary: Record<string, EvidenceCategory>;
+  lessonKind?: 'attention_lab' | 'open';
 }
 
 const CONCEPTS = [
@@ -15,7 +16,12 @@ const CONCEPTS = [
   { id: 'causal_masking', name: 'Causal masking' },
 ];
 
-export const EvidencePanel: React.FC<EvidencePanelProps> = ({ evidenceSummary }) => {
+export const EvidencePanel: React.FC<EvidencePanelProps> = ({ evidenceSummary, lessonKind = 'attention_lab' }) => {
+  // The attention lab has a fixed concept map; any other lesson shows the concepts its tutor actually checked.
+  const known = new Set(CONCEPTS.map((c) => c.id));
+  const discovered = Object.keys(evidenceSummary).filter((id) => !known.has(id))
+    .map((id) => ({ id, name: id.replaceAll('_', ' ').replace(/^./, (letter) => letter.toUpperCase()) }));
+  const concepts = lessonKind === 'open' ? discovered : [...CONCEPTS, ...discovered];
   const getBadgeClass = (cat?: EvidenceCategory) => {
     switch (cat) {
       case 'supported_independently':
@@ -64,7 +70,8 @@ export const EvidencePanel: React.FC<EvidencePanelProps> = ({ evidenceSummary })
       </p>
 
       <div className="concept-grid">
-        {CONCEPTS.map((c) => {
+        {concepts.length === 0 && <p className="evidence-intro">Concepts appear here once the tutor checks your understanding.</p>}
+        {concepts.map((c) => {
           const status = evidenceSummary[c.id];
           return (
             <div key={c.id} className="concept-card">

@@ -21,10 +21,20 @@ class Settings(BaseSettings):
     MODEL_OUTPUT_USD_PER_MILLION: float = 1.20
     APP_AI_BUDGET_USD: float = 10.00
 
+    # Web research (TinyFish search + fetch). Empty disables the tutor's web tools.
+    TINYFISH_API_KEY: str = ""
+    TINYFISH_SEARCH_URL: str = "https://api.search.tinyfish.ai"
+    TINYFISH_FETCH_URL: str = "https://api.fetch.tinyfish.ai"
+
     # Runner & Isolation
     RUNNER_IMAGE: str = "claimlab-runner:latest"
     PDF_PARSER_IMAGE: str = "claimlab-parser:latest"
     RUNNER_BACKEND: str = "local"  # "local" or "docker"
+
+    # Agent-written experiment sandbox: a dedicated venv holding only numpy
+    SANDBOX_VENV_DIR: str = "./.sandbox-venv"
+    SANDBOX_TIMEOUT_SECONDS: float = 10.0
+    SANDBOX_MEMORY_MB: int = 768
 
     model_config = SettingsConfigDict(
         env_file=".env",

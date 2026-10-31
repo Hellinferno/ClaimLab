@@ -27,7 +27,7 @@
 
 [![Meta AI](https://img.shields.io/badge/META%20AI-Developer%20Hackathon-7928CA?style=for-the-badge&logo=meta&logoColor=white)](https://meta.com)
 [![Model](https://img.shields.io/badge/NEURAL%20BACKBONE-muse--spark--1.3-00DFD8?style=for-the-badge&logo=meta&logoColor=black)](#-neural-orchestration--meta-muse-spark-13)
-[![Test Matrix](https://img.shields.io/badge/SYSTEM%20TESTS-66%20OFFLINE%20%2B%202%20LIVE%20PASSED-00F59B?style=for-the-badge&logo=pytest&logoColor=black)](#-system-telemetry--test-verification)
+[![Test Matrix](https://img.shields.io/badge/SYSTEM%20TESTS-121%20OFFLINE%20%2B%202%20LIVE%20PASSED-00F59B?style=for-the-badge&logo=pytest&logoColor=black)](#-system-telemetry--test-verification)
 [![CI](https://img.shields.io/github/actions/workflow/status/Hellinferno/ClaimLab/ci.yml?branch=main&style=for-the-badge&logo=githubactions&logoColor=white&label=CI)](https://github.com/Hellinferno/ClaimLab/actions/workflows/ci.yml)
 [![Client](https://img.shields.io/badge/CLIENT-React%2019%20%7C%20TypeScript%206-61DAFB?style=for-the-badge&logo=react&logoColor=black)](#-repository-architecture)
 [![Kernel](https://img.shields.io/badge/NUMERICAL%20KERNEL-Python%203.12%20%7C%20FastAPI-FF007A?style=for-the-badge&logo=python&logoColor=white)](#-repository-architecture)
@@ -46,7 +46,7 @@
 ```
 
 <p align="center">
-  <b>ClaimLab</b> replaces conversational chatbot guesswork with verified scientific computing. It couples <b>Meta's <code>muse-spark-1.3</code></b> model with a <b>transactional SVG whiteboard engine</b>, <b>three strict numerical simulation recipes</b>, and a <b>closed-loop pedagogical state machine</b>.
+  <b>ClaimLab</b> replaces conversational chatbot guesswork with verified scientific computing. It couples <b>Meta's <code>muse-spark-1.3</code></b> model with a <b>transactional SVG whiteboard engine</b>, <b>three reviewed numerical recipes</b>, <b>sandboxed tutor-written experiments for any paper</b>, and a <b>closed-loop pedagogical state machine</b>.
 </p>
 
 [Architecture](#-system-architecture) &bull; [Numerical Labs](#-the-three-verified-numerical-laboratories) &bull; [Quickstart](#-quickstart--deployment) &bull; [Telemetry & Proofs](#-system-telemetry--test-verification) &bull; [Security Invariants](#-security--fencing-invariants)
@@ -63,7 +63,7 @@ Traditional generative AI tutors suffer from three critical flaws:
 3. **Superficial Feedback Loops:** Simple chat turns acknowledge student answers without altering subsequent pedagogical strategy.
 
 ### ClaimLab's Core Breakthrough
-* **100% Measured Visuals:** Every plot, curve, and heatmap is rendered exclusively from retained numerical simulation outputs calculated by the reviewed float64 NumPy runner.
+* **100% Measured Visuals:** Every plot, curve, and heatmap is rendered exclusively from retained run outputs: the reviewed float64 NumPy recipes for the attention lab, or tutor-written NumPy code executed in an isolated sandbox for any other paper (the code, inputs, and checks are shown to the learner, and labelled as unreviewed).
 * **Strict Epistemic Partitioning:** All teacher utterances are tagged explicitly with `[Source]`, `[Experiment]`, or `[Background]` grounding badges.
 * **Evidence-Based Adaptation:** Student actions advance categorical mastery (`Introduced` &rarr; `Needs Check` &rarr; `Supported with Help` &rarr; `Supported Independently`). Progressing to independent mastery strictly requires completing **two distinct mathematical variants**.
 
@@ -225,11 +225,17 @@ python -m venv .venv
 pip install -r backend/requirements.txt
 pip install -e backend --no-deps
 
+# Create the experiment sandbox: a separate venv holding only numpy, used for tutor-written experiments
+python -m claimlab.scripts.setup_sandbox
+
+# Optional: web research for the live tutor. Put a TinyFish key (https://agent.tinyfish.ai/api-keys)
+# in .env as TINYFISH_API_KEY=...; without it the tutor teaches from the source alone.
+
 # Run the offline test suite (live Meta tests are marked live_meta and need MODEL_MODE=live + META_API_KEY)
 pytest backend/tests -m "not live_meta"
 
 # Start FastAPI application (the Vite dev proxy targets port 8080 by default)
-python -m uvicorn claimlab.api:app --host 127.0.0.1 --port 8080 --reload
+python -m uvicorn claimlab.api:app --host 127.0.0.1 --port 8080
 ```
 
 ### 3. Frontend Setup
@@ -295,7 +301,7 @@ META_API_KEY=your_key_here
 
 ```bash
 # 29 October 2026, local Windows run
-pytest backend/tests -m "not live_meta"   →  66 passed, 2 deselected
+pytest backend/tests -m "not live_meta"   →  121 passed, 2 deselected
 pytest backend/tests -m live_meta         →   2 passed (real muse-spark-1.3 calls)
 npm --prefix frontend run test:e2e        →   9 passed (Chrome, fixture mode)
 ```

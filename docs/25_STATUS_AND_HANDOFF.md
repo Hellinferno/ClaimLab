@@ -1,6 +1,6 @@
 # Status and Handoff
 
-**Updated:** 29 October 2026 IST · **Stage:** Local implementation, offline browser flows, and a live-model local browser review verified; deployment/release completion not established
+**Updated:** 31 October 2026 IST · **Stage:** Local implementation verified offline and with the live model, including open lessons for any paper with sandboxed tutor-written experiments; deployment/release completion not established
 
 ## Completed in this deliverable
 
@@ -17,8 +17,8 @@
 | Application repository and code | Implemented (FastAPI backend + React/TypeScript frontend + contracts) |
 | Exact dependency locks | Resolved and locked (`backend/requirements.txt`, `backend/requirements.lock`, `frontend/package.json`) |
 | Meta account/model access | 29 October: T-META-01/02 rerun and passed against `muse-spark-1.3`; a local live-mode browser lesson (start, answer, question, reload, delete) completed. Missing/failed live access returns 503 without fixtures |
-| Runner runtime | All three reviewed recipes implemented and checked locally; isolated container execution not verified in this work |
-| Application tests | 29 October: 66 offline tests passed, 2 live tests passed, 9/9 Chrome flows passed. See the dated entry |
+| Runner runtime | Three reviewed recipes checked locally. Tutor-written experiments run in a dedicated `.sandbox-venv` interpreter with AST/import allowlists and, on Windows, a Job Object (verified locally); container/OS-level isolation and the Linux limits are not verified |
+| Application tests | 29 October (evening): 112 offline tests passed, 2 live tests passed, 9/9 Chrome flows passed, plus a live-model browser walkthrough of an open lesson. See the latest dated entry |
 | Behavioral Evaluation Benchmark | 12/12 fixture cases included in the offline suite. Owner DB erasure is covered separately by `test_delete_erases_all_owner_content_and_preserves_another_owner`. Live benchmark was not rerun |
 | Frontend compilation | TypeScript + production Vite build pass; KaTeX deferred until mathematics is shown |
 | Linter | Backend Ruff and frontend Oxlint pass |
@@ -242,3 +242,87 @@ Each new regression was confirmed to fail with its fix reverted.
 - A board plot bound to an earlier run shows a placeholder until selected (existing exact-run design).
 
 **Next step:** commit the change *including the untracked frontend files*, then implement and test the expiry sweeper (T-DATA-02) and verify container isolation before release.
+
+---
+
+## Progress Entry: 29 October 2026 (evening) — Any paper: paged whiteboard lessons, sandboxed experiments, web research
+
+**Repository/environment:** working tree on `main` at `6d9ca73`, uncommitted (no commit, push, or deployment). Windows/PowerShell, Python 3.12.10, numpy 2.1.3, Node 24, Chrome. `.env` uses `MODEL_MODE=live` with a configured Meta key; `TINYFISH_API_KEY` is not set yet, so web research is off.
+
+**Trigger:** a learner uploaded *Machine Learning-Enhanced Pairs Trading* (Hadad et al., 2024). The old keyword gate accepted it as an attention source ("attention", "key"), the board showed the attention diagram, the tutor note was one long block with raw `**` Markdown, and the only experiments were the three attention recipes. The user asked for paged responses, a teaching whiteboard, adaptation, web search (TinyFish), and experiments that follow the paper.
+
+**Behaviour changed (decisions D-23 to D-27 in doc 22):**
+
+- Topic assessment counts distinct attention-mechanism terms; other readable text becomes an `open` lesson in live mode (still `unsupported` in fixture mode). `SessionStateResponse` adds `lesson_kind`, `tutor_steps`, `tutor_turn`, `web_sources`; `/me` adds `web_research`.
+- Live tutor tools: `present_lesson` (paged steps with board items and a check), `run_python_experiment`, `web_search` and `read_web_page` (only with a TinyFish key), `assess_answer` (only when a written answer awaits judgment), plus the existing `get_source_excerpt` and `run_experiment`. Up to 7 provider calls per turn; after 150 s only `present_lesson` is offered. The turn lease rose from 180 s to 300 s; `max_tokens` from 4096 to 8192. The context now carries up to 14,000 characters of the passage, the board, evidence, the session's runs, the previous steps, and the graded answer.
+- `services/lesson_builder.py` lays out the board, connects arrows, drops quotes not verbatim in their anchor and plots without a retained run, accepts drifted keys for step prose and tags, turns inline "A) … B) …" options into choices, and keys tutor checks privately. `services/sandbox_runs.py` retains sandbox runs (`sandbox_python_v1`) and re-runs them with declared knobs via `POST /runs` with `base_run_id`. `services/web_research.py` wraps TinyFish search/fetch. `claimlab/sandbox/` is the isolated executor; `python -m claimlab.scripts.setup_sandbox` creates `.sandbox-venv`.
+- Frontend: a paged tutor note with safe Markdown and citations, choice answers, a whiteboard that reveals and highlights each step's drawing, a sandbox chart, a "Tutor's lab" panel (knobs, metrics, table, claim checks, code, printed output), and a learning trail that lists the open lesson's concepts.
+
+**Checks:**
+
+- `pytest backend/tests -m "not live_meta"`: 112 passed, 2 deselected (66 earlier + 34 sandbox + 12 open-lesson); 120 after the 30 October sandbox fix (+8).
+- `pytest backend/tests -m live_meta`: 2 passed.
+- `ruff check backend/`: passed. `npm --prefix frontend run build` and `lint`: passed. `npx playwright test`: 9/9 passed.
+- Live API smoke on the pairs-trading paper (pages 1–2): classified `open`; the tutor wrote a paper-specific experiment (profit per trade versus an abstain threshold, with cost and noise knobs) whose claim checks passed, drew a concept chain with labelled arrows, the paper's hedge-ratio equation, verified source quotes, and the measured plot over four pages. Turn latency 33–43 s across four single observations.
+- Live browser walkthrough (headless Chrome, real model): steps revealed 1→3→5→7 board items with no console errors. After a wrong answer the tutor diagnosed a total-versus-average misconception, revisited the source claim, and set a new variant.
+
+**Failures found and fixed during this work (kept as evidence):** the pager split leaked tag names (capturing group in `re.split`); one live turn sent step prose under a key other than `say`, so the pages rendered titles only; the radio inputs inherited `width: 100%`; the measured chart appeared under the board before its step; quote cards showed the start of a page-sized anchor instead of the claim; tags and inline choices were lost when the model drifted from the schema; the progress panel listed only the six attention concepts. Each has a fix and, where it is backend logic, a regression test.
+
+**Security review (30 October, automated):** flagged the sandbox's in-process policy as a file-read escape. Confirmed: `import numpy.ma.mrecords` passed the policy and `openfile(path)` attempted to open the path (it failed only because the child's working directory is empty; an absolute path would have been read). `np.ma`, `np.rec`, `np.char`, and `np.show_config()` were also reachable. Fixed by allowing numpy only through `numpy.random`, `numpy.linalg`, `numpy.fft`, and `numpy.polynomial` (enforced by the static policy and by the child's runtime module guard), and blocking the configuration reports. Eight regression tests added; the same probes are now rejected before any process starts. The review's main recommendation, OS-level isolation, is **not** implemented (see Unresolved).
+
+**Unresolved:**
+
+- `GET /api/v1/jobs/{id}/events` (pre-existing): FastAPI 0.115 closes the request's DB session before the streaming body runs, so the stream sends its first events and then fails on `db.refresh(job)`. The frontend does not use it; the new answer-key event is filtered from it regardless.
+- Sandbox: the Python-level policy is the only file-access barrier. On Windows the child runs as the user, so a policy bypass could read the user's files and the tutor could then send them out through `web_search`. There is no OS-level network block (`socket` is not importable). Linux rlimits and process-group kill are untested. Real OS isolation (container with no network, read-only root, separate UID; or an AppContainer on Windows, which needs ACL changes on the Python install) is required before any hosted or shared use.
+- Live model output still varies: for example, a chart that mixed series on different scales, or a check tagged `background`. The prompt and the normalizers reduce this but do not eliminate it.
+- `uvicorn --reload` on Windows hung once after an edit (it logged "Reloading" and kept serving old code), so the README now starts the API without `--reload`.
+- Carried over: expiry sweeper (T-DATA-02), synchronous tutor/recipe routes, and the live benchmark was not rerun.
+
+**Next dependency-ready step:** add the TinyFish key and run a live lesson with web research; then commit (including the untracked `sandbox/`, `services/lesson_builder.py`, `sandbox_runs.py`, `web_research.py`, tests, `Markdown.tsx`, and `runs.ts`) and verify sandbox isolation on Linux CI before any hosted release.
+
+**Addendum (30 October): web research live.** `TINYFISH_API_KEY` was added to `.env` (value not recorded). Search and fetch were verified directly (6 results; page fetched and truncated to 6,000 characters). On the first live lesson the tutor did not call web tools, so the first-turn context now asks for one cited `web` step; afterwards the tutor called `web_search` and `read_web_page` and cited Wikipedia/QuestDB pages. Knobs are now a required argument of `run_python_experiment` (one run had declared none). Further live drift found and handled, each with a regression test: drawings under keys other than `draw`, `type` instead of `kind`, synonym tags (`Measured`), cited URLs differing from the fetched URL in scheme/`www`/trailing slash, steps flattened into a single board item (logged shape: `id, kind, from, relation, latex, run_id` beside `say, tag`), and pre-lettered choices. Steps that arrive without prose or drawings are now logged by key shape (never content). The sandbox chart's tick labels follow the axis range. Checks: 121 offline tests passed, 9/9 Chrome flows passed; a live browser walkthrough showed the board growing 2→3→5→7 items, a cited web step, and a diagnosed wrong answer, with no console errors. First-turn latency with research: 43–90 s across three single observations.
+
+---
+
+## Progress Entry: 31 October 2026 — Workspace divided into pages
+
+**Repository/environment:** working tree on `main` at `6d9ca73`, still uncommitted (includes the 29–30 October work). Windows/PowerShell, Chrome.
+
+**Trigger:** the user found everything crowded onto one long page; the rail buttons only scrolled.
+
+**Behaviour changed (D-28 in doc 22, UX doc 03 updated):** `frontend/src/App.tsx` defines four pages (Source, Whiteboard, Experiment, Progress), switched from the rail and kept in the URL hash (`pushState` plus a `popstate` listener, so Back/Forward and reload work). Inactive pages carry the `hidden` attribute (`[hidden] { display: none !important }`) and are not unmounted, so drafts, lab inputs, and board selection survive switching. Each page has its own heading. The Whiteboard page shows the board and the tutor card side by side (tutor column 330–420 px), stacked below 1080 px; Source places the reader beside the learning loop; Experiment and Progress use a single 760 px column. Uploading opens Source, a successful lesson start opens Whiteboard, and the welcome board gained an "Or bring your own PDF" link to Source. The skip link targets the active page.
+
+**Checks (31 October):**
+
+- Before the change: `pytest backend/tests -m "not live_meta"` 121 passed, 2 deselected; `ruff check backend/` passed; frontend build passed.
+- After: `npm --prefix frontend run build` and `oxlint` passed; `npx playwright test` 9/9 passed (run twice; the second run after the final layout edit). Two specs now click the rail before typing into the Source form and the lab inputs. The mobile spec asserts that only one page shows at a time and that Back returns to the previous page.
+- Visual check: fixture-mode screenshots of all four pages at 1440 px and of the Whiteboard page at 1000 px, plus the regenerated `reports/ui-*.png`.
+
+**Unresolved:** a lab run's chart is drawn on the Whiteboard page, not beside the lab's results table, so a learner switches pages to see it. Earlier unresolved items stand.
+
+**Next dependency-ready step:** unchanged from the 29 October entry: commit the working tree (including the untracked sandbox files) and verify sandbox isolation on Linux CI before any hosted release.
+
+### Follow-up (31 October): tutor beside the source; faster, direct, detailed live answers (D-29)
+
+**User report:** answers were slow, abstract, and not to the point; a question asked on the Source page answered on the Whiteboard page.
+
+**Evidence before the change (user's live session, `forecasting-06-00024-v2.pdf` pp. 1-4, "what is high frequency data", then the wrong answer "daily closes"):** turns took 33-50 s. The first turn made 6 sequential tool calls (web_search, get_source_excerpt, read_web_page, 2 x run_python_experiment, present_lesson). The second turn's narration was titles only (`Your gap: daily vs minute:` ...); the server logged `Lesson step without prose (keys=[..., 'say', ...])`, so `say` was present but not a non-empty string. The third turn was telegraphic ("Daily keeps 1 point per day."). The first-turn context said "introduce the passage's central idea" and never asked the tutor to answer the learner's question; the prompt capped steps at "1-3 plain sentences (under 60 words)".
+
+**Behaviour changed:**
+
+- Frontend: one tutor panel (`TaskCard`) rendered beside both Source and Whiteboard (`.workspace-pages.with-tutor`); starting a lesson no longer navigates. A `TutorWorking` status with elapsed seconds shows during lesson start and learner events. The learning loop moved to Progress. A "See this step drawn on the whiteboard" link appears under the tutor on Source.
+- `agent_orchestrator.py`: "Answer first" rules (step 1 answers the question; concrete names, numbers, definitions, a worked example; no filler); 3-5 steps of 2-5 sentences (50-120 words); the first-turn context quotes the learner's question and asks for a direct answer; a learner message must be answered in step 1; web research optional on every turn; `get_source_excerpt` offered only when `passage_fits()` is false; feedback turns (answer or hint) with a succeeded run get no experiment tools; `run_digest()` adds each recent run's summary/metrics to the context; `assess_answer` asked to share a reply with `present_lesson`; `LIVE_TURN_SECONDS` 150 -> 60.
+- `lesson_builder.py`: `step_prose()` recovers prose sent as a list or object; a step with no prose falls back to its concept/note labels as bullets (never quotes); body cap 900 -> 1500 characters; the warning now logs the text keys' types.
+
+**Checks:**
+
+- `pytest backend/tests -m "not live_meta"`: 123 passed, 2 deselected (new: `test_step_prose_survives_lists_objects_and_title_only_steps`, `test_source_excerpt_tool_is_offered_only_when_the_passage_was_cut`; extended: first-turn context and tool list, feedback-turn tools and measured run digest). `pytest -m live_meta`: 2 passed. `ruff check backend/`: passed.
+- `npm --prefix frontend run build`, `oxlint`: passed. `npx playwright test`: 9/9 passed; the upload spec now asserts that asking from Source keeps Source visible with the tutor beside it.
+- Live replays of the user's lesson as a throwaway guest (single observations each, data deleted afterwards):
+  1. After prompt/tool changes: turn 1 36.1 s (run_python_experiment x2 -> present_lesson), turn 2 32.4 s; steps 46-90 words, step 1 answered directly.
+  2. After the feedback-turn change: turn 1 27.8 s, turn 2 17.3 s (present_lesson only). Turn 2 invented run details ("20-minute dip of $1.50"; the run had a 10-minute 2% jump) because the context carried run ids only.
+  3. After adding `run_digest`: turn 1 23.4 s, turn 2 45.8 s. Turn 2 quoted the run's real values (0.0279 vs 0.0106). It was slow because the check was free text: `assess_answer` (~22 s) and `present_lesson` (~23 s) came as separate replies. The same-reply instruction was added after this replay and **has not been observed live**.
+
+**Unresolved:** live latency is still dominated by model generation (the final `present_lesson` reply takes 12-23 s); streaming the lesson or running turns as background jobs with progressive display would be the next step. The tutor sometimes repeats the same check after a wrong answer instead of a new variant. Turn times above are single observations, not percentiles.
+
+**Next dependency-ready step:** observe a live written-answer turn to confirm `assess_answer` and `present_lesson` arrive in one reply; then commit the working tree and verify sandbox isolation on Linux CI before any hosted release.

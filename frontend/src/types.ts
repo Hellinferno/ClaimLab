@@ -17,6 +17,7 @@ export interface Me {
     max_pages: number;
     max_sessions: number;
   };
+  web_research?: boolean;
 }
 
 export interface DocumentPageMeta {
@@ -105,6 +106,51 @@ export interface ActiveTask {
   task_variant: string;
   question: string;
   expected_type: string;
+  choices?: string[];
+}
+
+export type StepTag = 'source' | 'background' | 'web' | 'experiment' | 'interpretation' | 'assumption';
+
+/** One page of the tutor's lesson; object_ids are the board items it draws or points at. */
+export interface TutorStep {
+  title: string;
+  body: string;
+  tag: StepTag;
+  object_ids: string[];
+  anchor_id?: string;
+  url?: string;
+}
+
+export interface WebSource {
+  title: string;
+  url: string;
+}
+
+export interface SandboxParameterSpec {
+  name: string;
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step?: number | null;
+  integer: boolean;
+}
+
+export interface SandboxSeries {
+  name: string;
+  x: number[];
+  y: number[];
+}
+
+export interface SandboxOutput {
+  summary?: string;
+  metrics?: Record<string, number | string | boolean>;
+  chart?: { title: string; x_label?: string; y_label?: string; kind?: 'line' | 'bar' } | null;
+  series?: SandboxSeries[];
+  table?: { columns: string[]; rows: (number | string | boolean | null)[][] } | null;
+  checks?: { name: string; passed: boolean; detail?: string }[];
+  stdout?: string;
+  error?: string;
 }
 
 export interface SessionState {
@@ -118,6 +164,10 @@ export interface SessionState {
   latest_run_id?: string | null;
   source_selection?: SourceSelection | null;
   tutor_narration?: string | null;
+  tutor_steps?: TutorStep[];
+  tutor_turn?: string | null;
+  web_sources?: WebSource[];
+  lesson_kind?: 'attention_lab' | 'open';
 }
 
 export interface CheckResult {

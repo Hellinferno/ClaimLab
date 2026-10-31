@@ -1,5 +1,6 @@
-import React, { lazy, memo, Suspense, useId, useMemo, useState } from 'react';
-import type { BoardObject, SceneGraph, ExperimentRun } from '../types';
+import React, { lazy, memo, Suspense, useEffect, useId, useMemo, useRef, useState } from 'react';
+import type { BoardObject, SceneGraph, ExperimentRun, SandboxOutput, SandboxSeries } from '../types';
+import { isChecked, SANDBOX_RECIPE } from '../runs';
 
 const LazyBoardEquation = lazy(() => import('./Math').then(module => ({ default: module.BoardEquation })));
 
@@ -9,20 +10,25 @@ interface WhiteboardProps {
   isStale?: boolean;
   onSelectObject?: (obj: BoardObject) => void;
   selectedObjectId?: string | null;
+  /** Lesson pacing: the latest turn's drawings appear step by step. */
+  revealTurn?: string | null;
+  revealStep?: number;
+  focusIds?: string[];
 }
 
 const INK = '#243d35', MUTED = '#667a70', GREEN = '#377b60', AMBER = '#b88250', LINE = '#dde4de';
-function isChecked(run: ExperimentRun | null): run is ExperimentRun & { status: 'succeeded' } {
-  return !!run && run.status === 'succeeded' && !!run.output
-    && run.checks.some((check) => check.status === 'passed')
-    && run.checks.every((check) => check.status !== 'failed');
+const SERIES_COLORS = [GREEN, AMBER, '#4f6fa8', '#9a5a8c', '#5f8f8a', '#8a7a4f'];
+function sandboxSeries(output: SandboxOutput | undefined): SandboxSeries[] {
+  return (output?.series || []).filter((series) => finiteArray(series.x) && finiteArray(series.y) && series.x.length === series.y.length);
 }
 function finiteArray(value: unknown): value is number[] {
   return Array.isArray(value) && value.length > 0
     && value.every((item) => typeof item === 'number' && Number.isFinite(item));
 }
 function numberLabel(value: number): string {
-  return value >= 100 ? value.toFixed(0) : value >= 10 ? value.toFixed(1) : value.toFixed(2);
+  const size = Math.abs(value);
+  if (size !== 0 && (size >= 1e5 || size < 1e-3)) return value.toExponential(1);
+  return size >= 100 ? value.toFixed(0) : size >= 10 ? value.toFixed(1) : value.toFixed(2);
 }
 
 function matchesPlot(object: BoardObject, run: ExperimentRun | null): run is ExperimentRun & { status: 'succeeded' } {
@@ -31,6 +37,7 @@ function matchesPlot(object: BoardObject, run: ExperimentRun | null): run is Exp
     attention_scaling_v1: ['results'],
     softmax_sensitivity_v1: ['base_probabilities', 'scaled_probabilities'],
     causal_masking_v1: ['masked_weights'],
+    [SANDBOX_RECIPE]: ['series'],
   };
   return fields[run.recipe_id]?.includes(object.payload.field) === true;
 }
@@ -45,6 +52,12 @@ function varianceRows(output: ExperimentRun['output']): VarianceRow[] {
   return [...output.results].sort((a: VarianceRow, b: VarianceRow) => a.dimension - b.dimension);
 }
 function runSummary(run: ExperimentRun): string {
+  if (run.recipe_id === SANDBOX_RECIPE) {
+    const output = run.output as SandboxOutput;
+    const series = sandboxSeries(output).map((item) => `${item.name}: ${item.y.length} points, from ${numberLabel(item.y[0])} to ${numberLabel(item.y[item.y.length - 1])}`);
+    const metrics = Object.entries(output.metrics || {}).map(([name, value]) => `${name} ${typeof value === 'number' ? numberLabel(value) : String(value)}`);
+    return [output.summary, ...series, ...metrics].filter(Boolean).join('. ') || 'No reported values.';
+  }
   if (run.recipe_id === 'attention_scaling_v1') return varianceRows(run.output).map((row) =>
     `Dimension ${row.dimension}: unscaled variance ${numberLabel(row.unscaled_variance)}, scaled variance ${numberLabel(row.scaled_variance)}`).join('. ');
   if (run.recipe_id === 'softmax_sensitivity_v1') {
@@ -61,6 +74,43 @@ function runSummary(run: ExperimentRun): string {
 const RunChart = memo(({ run, width, height, earlier = false }: { run: ExperimentRun; width: number; height: number; earlier?: boolean }) => {
   const left = 43, right = width - 23, top = 65, bottom = height - 48;
   const chartHeight = Math.max(40, bottom - top);
+  if (run.recipe_id === SANDBOX_RECIPE) {
+    const output = run.output as SandboxOutput, series = sandboxSeries(output).slice(0, SERIES_COLORS.length);
+    const title = output.chart?.title || String(run.parameters.title || 'Measured result');
+    if (!series.length) return <g data-run-id={run.run_id}><text x="18" y="25" fill={INK} fontSize="13" fontWeight="650">{title}</text><text x="18" y="60" fill={MUTED} fontSize="11">{output.summary || 'This run reported numbers, not a series. See the lab panel.'}</text></g>;
+    const xs = series.flatMap((item) => item.x), ys = series.flatMap((item) => item.y);
+    const bars = output.chart?.kind === 'bar';
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(bars ? 0 : Infinity, ...ys), maxY = Math.max(bars ? 0 : -Infinity, ...ys);
+    const spanY = maxY - minY || Math.abs(maxY) || 1, lowY = minY - (bars ? 0 : spanY * 0.05), highY = maxY + spanY * 0.05;
+    const x = (value: number) => maxX === minX ? (left + right) / 2 : left + (value - minX) / (maxX - minX) * (right - left);
+    const y = (value: number) => bottom - (value - lowY) / (highY - lowY) * chartHeight;
+    // Tick precision follows each axis's range, so a 0.002–0.009 profit axis does not read 0.00, 0.00, 0.01.
+    const tick = (span: number) => (value: number) => Math.abs(span) >= 1e5 ? value.toExponential(1)
+      : value.toFixed(Math.min(6, Math.max(0, Math.ceil(-Math.log10(Math.abs(span) || 1)) + 1)));
+    const yTick = tick(highY - lowY), xTick = tick(maxX - minX);
+    const band = (right - left) / Math.max(1, series[0].x.length), barWidth = Math.max(2, band * 0.8 / series.length);
+    return <g role="img" aria-label={`${title}. ${runSummary(run)}`} data-run-id={run.run_id}>
+      <title>{title}</title>
+      <text x="18" y="25" fill={INK} fontSize="13" fontWeight="650">{title.slice(0, 70)}</text>
+      <text x="18" y="43" fill={MUTED} fontSize="10">{earlier ? 'Earlier run' : 'Run'} {run.run_id.slice(0, 8)} · tutor-written sandbox experiment</text>
+      {[0, 0.5, 1].map((fraction) => { const value = lowY + (highY - lowY) * fraction; return <g key={fraction}>
+        <line x1={left} x2={right} y1={y(value)} y2={y(value)} stroke={LINE} strokeDasharray="3 4" />
+        <text x={left - 6} y={y(value) + 3} textAnchor="end" fill={MUTED} fontSize="9">{yTick(value)}</text>
+      </g>; })}
+      <line x1={left} x2={right} y1={bottom} y2={bottom} stroke={LINE} />
+      <text x={left} y={bottom + 15} fill={MUTED} fontSize="9">{xTick(minX)}</text>
+      <text x={right} y={bottom + 15} fill={MUTED} fontSize="9" textAnchor="end">{xTick(maxX)}</text>
+      {output.chart?.x_label && <text x={(left + right) / 2} y={bottom + 15} fill={MUTED} fontSize="9" textAnchor="middle">{output.chart.x_label.slice(0, 50)}</text>}
+      {output.chart?.y_label && <text x={left} y={top - 8} fill={MUTED} fontSize="9">{output.chart.y_label.slice(0, 50)}</text>}
+      {series.map((item, index) => bars
+        ? <g key={item.name} data-series={item.name}>{item.y.map((value, point) => <rect key={point} x={left + band * point + band * 0.1 + barWidth * index} y={Math.min(y(value), y(0))} width={barWidth} height={Math.abs(y(value) - y(0))} fill={SERIES_COLORS[index]} rx="1"><title>{item.name}: {value}</title></rect>)}</g>
+        : <polyline key={item.name} data-series={item.name} fill="none" stroke={SERIES_COLORS[index]} strokeWidth="2" strokeDasharray={index % 2 ? '5 3' : undefined} points={item.x.map((value, point) => `${x(value)},${y(item.y[point])}`).join(' ')}><title>{item.name}</title></polyline>)}
+      {series.map((item, index) => <g key={item.name} transform={`translate(${18 + (index % 3) * Math.min(190, (width - 36) / 3)}, ${height - 14 - Math.floor(index / 3) * 13})`}>
+        <rect y="-6" width="10" height="4" fill={SERIES_COLORS[index]} rx="1" /><text x="14" y="-2" fontSize="9" fill={INK}>{item.name.slice(0, 26)}</text>
+      </g>)}
+    </g>;
+  }
   if (run.recipe_id === 'attention_scaling_v1') {
     const rows = varianceRows(run.output);
     if (!rows.length) return <text x="18" y="90" fill={MUTED} fontSize="12">No valid variance output to display.</text>;
@@ -144,17 +194,38 @@ const RunChart = memo(({ run, width, height, earlier = false }: { run: Experimen
   </g>;
 });
 
-export const Whiteboard: React.FC<WhiteboardProps> = ({ scene, activeRun, isStale = false, onSelectObject, selectedObjectId }) => {
+export const Whiteboard: React.FC<WhiteboardProps> = ({ scene, activeRun, isStale = false, onSelectObject, selectedObjectId, revealTurn = null, revealStep = Number.POSITIVE_INFINITY, focusIds }) => {
   const markerId = useId().replace(/:/g, '');
+  const surfaceRef = useRef<HTMLDivElement>(null);
   const [localSelection, setLocalSelection] = useState<string | null>(null);
   const [retainedRuns, setRetainedRuns] = useState<Record<string, ExperimentRun>>({});
   const [lookupError, setLookupError] = useState('');
   const [readableSize, setReadableSize] = useState(false);
-  const objects = useMemo(() => scene.objects || [], [scene]);
+  const allObjects = useMemo(() => scene.objects || [], [scene]);
+  // Drawings for later steps of the current lesson stay hidden until the learner reaches them.
+  const objects = useMemo(() => {
+    const hidden = new Set(allObjects.filter((object) => revealTurn && object.payload.turn === revealTurn
+      && typeof object.payload.step === 'number' && object.payload.step > revealStep).map((object) => object.id));
+    return allObjects.filter((object) => !hidden.has(object.id) && !(object.type === 'connector'
+      && (hidden.has(object.payload.from_object_id) || hidden.has(object.payload.to_object_id))));
+  }, [allObjects, revealTurn, revealStep]);
+  const focusKey = (focusIds || []).join('\n');
+  const focused = useMemo(() => new Set(focusKey ? focusKey.split('\n') : []), [focusKey]);
   const byId = useMemo(() => new Map(objects.map((object) => [object.id, object])), [objects]);
+  // Bring the current step's drawing into view inside the board, without moving the page.
+  useEffect(() => {
+    const surface = surfaceRef.current, first = focusKey.split('\n')[0];
+    const target = first ? surface?.querySelector(`[data-object-id="${CSS.escape(first)}"]`) : null;
+    if (!surface || !target) return;
+    const offset = target.getBoundingClientRect().top - surface.getBoundingClientRect().top;
+    if (offset < 0 || offset > surface.clientHeight - 60) {
+      surface.scrollTo({ top: surface.scrollTop + offset - 24, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
+    }
+  }, [focusKey]);
   const selection = selectedObjectId === undefined ? localSelection : selectedObjectId;
   const selectedObject = selection ? byId.get(selection) : undefined;
   const bounds = useMemo(() => {
+    // The board grows with the drawing, the way a teacher fills it in.
     const shapes = objects.filter((object) => object.type !== 'connector');
     const minX = Math.min(0, ...shapes.map((object) => object.position.x - 18)), minY = Math.min(0, ...shapes.map((object) => object.position.y - 18));
     const maxX = Math.max(780, ...shapes.map((object) => object.position.x + object.dimensions.width + 18));
@@ -162,7 +233,8 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({ scene, activeRun, isStal
     return `${minX} ${minY} ${maxX - minX} ${maxY - minY}`;
   }, [objects]);
   const checked = isChecked(activeRun);
-  const sceneHasCurrentRun = checked && objects.some((object) => object.type === 'plot_ref' && matchesPlot(object, activeRun));
+  // A plot waiting for a later step still owns its run: do not reveal the result early below the board.
+  const sceneHasCurrentRun = checked && allObjects.some((object) => object.type === 'plot_ref' && matchesPlot(object, activeRun));
   const select = (object: BoardObject) => {
     setLocalSelection(object.id);
     setLookupError('');
@@ -182,7 +254,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({ scene, activeRun, isStal
       <div className="whiteboard-title"><span className="board-kicker">01 / EXPLORE</span><h3>Shared whiteboard</h3></div>
       <span className="board-status">{isStale ? 'Earlier inputs' : 'Saved board'} · rev {scene.board_revision}</span>
     </div>
-    <div className="whiteboard-surface">
+    <div className="whiteboard-surface" ref={surfaceRef}>
       {objects.length ? <svg viewBox={bounds} className="whiteboard-canvas" style={readableSize ? { minWidth: `${bounds.split(' ')[2]}px` } : undefined} role="group" aria-label="Shared whiteboard diagram">
         <defs><marker id={markerId} viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 9 5 L 0 9" fill="none" stroke={GREEN} strokeWidth="1.5" /></marker></defs>
         {objects.filter((object) => object.type === 'connector').map((connector) => {
@@ -201,22 +273,24 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({ scene, activeRun, isStal
           </g>;
         })}
         {objects.filter((object) => object.type !== 'connector').map((object) => {
-          const { width, height } = object.dimensions, selected = object.id === selection;
+          const { width, height } = object.dimensions, selected = object.id === selection, isFocused = focused.has(object.id);
           const plotRun = object.payload.run_id === activeRun?.run_id ? activeRun : retainedRuns[object.payload.run_id] || null;
           const plotRunMatches = object.type === 'plot_ref' && matchesPlot(object, plotRun);
-          return <g key={object.id} transform={`translate(${object.position.x}, ${object.position.y})`}
+          const quote = object.payload.kind === 'quote', tutorItem = object.payload.author === 'tutor';
+          return <g key={object.id} data-object-id={object.id} className={isFocused ? 'board-focus' : undefined} transform={`translate(${object.position.x}, ${object.position.y})`}
             role="button" tabIndex={0} aria-label={`Inspect ${object.label}`} aria-pressed={selected}
             onClick={() => select(object)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); select(object); } }} style={{ cursor: 'pointer' }}>
             <title>{object.label}</title>
-            <rect width={width} height={height} rx="12" fill={object.type === 'equation' ? '#e8f2ec' : '#fffefb'} stroke={selected ? GREEN : LINE} strokeWidth={selected ? 2 : 1} />
+            <rect width={width} height={height} rx="12" fill={object.type === 'equation' ? '#e8f2ec' : quote ? '#f7f3e6' : '#fffefb'} stroke={selected ? GREEN : isFocused ? AMBER : LINE} strokeWidth={selected || isFocused ? 2 : 1} />
+            {quote && <rect x="0" y="12" width="4" height={Math.max(0, height - 24)} rx="2" fill={AMBER} />}
             {object.type === 'equation' ? <foreignObject x="10" y="4" width={Math.max(1, width - 20)} height={Math.max(1, height - 8)}><Equation latex={String(object.payload.latex || '')} /></foreignObject>
               : object.type === 'plot_ref' ? plotRunMatches ? <RunChart run={plotRun} width={width} height={height} earlier={plotRun.run_id !== activeRun?.run_id} />
                 : <foreignObject x="18" y="18" width={Math.max(1, width - 36)} height={Math.max(1, height - 36)}><div className="board-plot-placeholder">
                   <strong>{String(object.payload.title || object.label)}</strong><p>{object.payload.run_id ? `Earlier run ${String(object.payload.run_id).slice(0, 8)}` : 'No retained run attached'}</p>
                   <p>{object.payload.run_id ? 'Select this card to inspect its saved result.' : 'Run an experiment to inspect checked numerical output.'}</p>
                 </div></foreignObject>
-              : <foreignObject x="10" y="7" width={Math.max(1, width - 20)} height={Math.max(1, height - 14)}><div className="board-node-content">
-                <strong>{String(object.payload.title || object.label)}</strong>{object.payload.description && <p>{String(object.payload.description)}</p>}{object.payload.text && <p>{String(object.payload.text)}</p>}
+              : <foreignObject x={quote ? 16 : 10} y="7" width={Math.max(1, width - (quote ? 26 : 20))} height={Math.max(1, height - 14)}><div className={'board-node-content' + (tutorItem ? ' tutor-item' : '') + (quote ? ' board-quote' : '')}>
+                <strong>{quote ? ['From the source', object.label].filter((part, index) => index === 0 || part !== 'From the source').join(' · ') : String(object.payload.title || object.label)}</strong>{object.payload.description && <p>{String(object.payload.description)}</p>}{object.payload.text && <p>{quote ? `“${String(object.payload.text)}”` : String(object.payload.text)}</p>}
               </div></foreignObject>}
           </g>;
         })}
@@ -232,7 +306,7 @@ export const Whiteboard: React.FC<WhiteboardProps> = ({ scene, activeRun, isStal
     {checked && !sceneHasCurrentRun && <div className="board-current-run"><div className="board-current-run-header"><span className="board-kicker">MEASURED OBSERVATION</span><span className="board-status">{isStale ? 'Earlier inputs' : 'Current run'} · {activeRun.run_id.slice(0, 8)}</span></div>
       <div className="board-current-run-scroll"><svg viewBox="0 0 620 300" className="board-current-chart" style={readableSize ? { minWidth: '620px' } : undefined} aria-label="Current experiment output"><RunChart run={activeRun} width={620} height={300} /></svg></div>
     </div>}
-    {checked && <details className="board-data-summary"><summary>Read chart values · run {activeRun.run_id.slice(0, 8)}{isStale ? ' · Earlier inputs' : ''}</summary><p>{runSummary(activeRun)}</p></details>}
+    {checked && (!sceneHasCurrentRun || objects.some((object) => object.type === 'plot_ref' && object.payload.run_id === activeRun.run_id)) && <details className="board-data-summary"><summary>Read chart values · run {activeRun.run_id.slice(0, 8)}{isStale ? ' · Earlier inputs' : ''}</summary><p>{runSummary(activeRun)}</p></details>}
     {activeRun && !checked && <p className="board-detail" role="status">Experiment {activeRun.status}. Checked numerical output is not available for this run.</p>}
   </div>;
 };

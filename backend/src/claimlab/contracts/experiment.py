@@ -1,4 +1,4 @@
-"""Contracts and schemas for the three reviewed experiment recipes."""
+"""Contracts and schemas for the three reviewed experiment recipes and agent-written sandbox runs."""
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 from pydantic import Field, field_validator
@@ -9,6 +9,19 @@ class RecipeId(str, Enum):
     SOFTMAX_SENSITIVITY = "softmax_sensitivity_v1"
     ATTENTION_SCALING = "attention_scaling_v1"
     CAUSAL_MASKING = "causal_masking_v1"
+    # Tutor-written numpy code run in the isolated sandbox; not a reviewed recipe.
+    SANDBOX_PYTHON = "sandbox_python_v1"
+
+
+class SandboxParameterSpec(StrictModel):
+    """A numeric knob the learner may change before re-running a sandbox experiment."""
+    name: str = Field(..., pattern=r"^[a-z][a-z0-9_]{0,31}$")
+    label: str = Field(default="", max_length=60)
+    value: float
+    min: float
+    max: float
+    step: Optional[float] = Field(default=None, gt=0)
+    integer: bool = False
 
 
 # --- Recipe A: Softmax Sensitivity ---

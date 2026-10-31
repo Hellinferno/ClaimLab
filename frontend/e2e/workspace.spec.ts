@@ -151,6 +151,10 @@ test('single-page uploads use real pages and unsupported material does not becom
   await page.getByLabel('What would you like to understand?').fill('Why does attention divide scores by the square root of the key dimension?');
   await page.getByRole('button', { name: 'Explore this question' }).click();
   await expect(page.getByLabel('Your answer')).toBeEnabled();
+  // The answer appears beside the source the learner asked from, not on another page.
+  await expect(page.locator('#source')).toBeVisible();
+  await expect(page.getByLabel('Your answer')).toBeVisible();
+  await expect(page.locator('#whiteboard')).toBeHidden();
   const supported = await readSession(page);
   await page.getByLabel('Upload PDF', { exact: true }).setInputFiles(path.join(repoRoot, 'examples/unsupported_sample.pdf'));
   await expect(page.locator('.document-card')).toContainText('unsupported_sample.pdf');
@@ -184,6 +188,7 @@ test('questions preserve evidence and recorded help prevents independent-credit 
   expect(after.active_task).toEqual(before.active_task);
   await expect(page.locator('.tutor-body')).not.toContainText('sqrt(16) = 4');
   // Use a fresh lesson so this hint check is independent of the earlier wrong answer/question.
+  await page.getByRole('button', { name: 'Source', exact: true }).click();
   await page.getByLabel('What would you like to understand?').fill('How does scaling change attention score variance?');
   await page.getByRole('button', { name: 'Explore this question' }).click();
   await expect.poll(async () => (await readSession(page)).session_id).not.toBe(after.session_id);
@@ -214,6 +219,7 @@ test('questions preserve evidence and recorded help prevents independent-credit 
 test('lab drafts validate strictly, preserve earlier results on failure, and execute all three recipes', async ({ page }) => {
   await startExample(page);
   const initial = await readRun(page);
+  await page.getByRole('button', { name: 'Experiment', exact: true }).click();
   await page.getByLabel('Key dimensions').fill('16oops, 64');
   await expect(page.getByRole('button', { name: 'Run experiment' })).toBeDisabled();
   await expect(page.locator('.experiment-panel .result-status')).toContainText('Earlier inputs');
@@ -352,7 +358,12 @@ test('mobile and reduced-motion layouts keep the learning flow in the viewport',
   await page.getByRole('button', { name: 'Fit board to panel' }).click();
   await page.getByRole('button', { name: 'Experiment', exact: true }).click();
   await expect(page.locator('#experiment')).toBeInViewport();
+  await expect(page.locator('#whiteboard')).toBeHidden();
   await page.screenshot({ path: path.join(repoRoot, 'reports/ui-workspace-mobile.png'), fullPage: true });
   await page.getByRole('button', { name: 'Whiteboard', exact: true }).click();
   await expect(page.locator('#whiteboard')).toBeInViewport();
+  await expect(page.locator('#experiment')).toBeHidden();
+  await page.goBack();
+  await expect(page.locator('#experiment')).toBeVisible();
+  await expect(page.getByLabel('Your answer')).toBeHidden();
 });

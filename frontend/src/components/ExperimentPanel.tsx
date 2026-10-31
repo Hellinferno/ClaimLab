@@ -1,13 +1,74 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { ExperimentRun } from '../types';
+import type { ExperimentRun, SandboxOutput, SandboxParameterSpec } from '../types';
 import { Icon } from './Icon';
+import { isChecked, SANDBOX_RECIPE } from '../runs';
 
 interface ExperimentPanelProps {
   activeRun: ExperimentRun | null;
-  onRunRecipe: (recipeId: string, parameters: Record<string, unknown>) => Promise<void>;
+  onRunRecipe: (recipeId: string, parameters: Record<string, unknown>, baseRunId?: string) => Promise<void>;
   isLoading: boolean;
   disabled?: boolean;
   onStaleChange: (stale: boolean) => void;
+  lessonKind?: 'attention_lab' | 'open';
+}
+function formatValue(value: unknown): string {
+  if (typeof value !== 'number') return String(value);
+  const size = Math.abs(value);
+  return Number.isInteger(value) && size < 1e6 ? String(value) : size !== 0 && (size >= 1e5 || size < 1e-3) ? value.toExponential(2) : value.toFixed(size >= 100 ? 1 : 3);
+}
+
+function RunEvidence({ run }: { run: ExperimentRun }) {
+  return <details className="run-evidence"><summary><Icon name="shield" size={14}/>{run.checks.filter(check => check.status === 'passed').length}/{run.checks.filter(check => check.status !== 'not_applicable').length} checks passed{run.checks.some(check => check.status === 'not_applicable') ? ` · ${run.checks.filter(check => check.status === 'not_applicable').length} not applicable` : ''} · inspect evidence<Icon name="chevron" size={13}/></summary><div className="evidence-details"><h3>{run.recipe_id === SANDBOX_RECIPE ? 'Checks' : 'Numerical checks'}</h3>{run.checks.map(check => <div key={check.name} className={'check-item ' + check.status}><strong>{check.status === 'passed' ? '✓' : check.status === 'failed' ? '×' : '—'} {check.name.replaceAll('_', ' ')}</strong><p>{check.detail}</p></div>)}<h3>Experiment assumptions</h3>{run.assumptions.map(item => <p key={item}>{item}</p>)}<h3>Exact retained inputs</h3><pre>{JSON.stringify(run.recipe_id === SANDBOX_RECIPE ? run.parameters.values : run.parameters, null, 2)}</pre><p>Run: <code>{run.run_id}</code></p><p>Runner: <code>{run.runner_digest}</code> · NumPy {run.numpy_version}</p></div></details>;
+}
+
+function parseKnobs(specs: SandboxParameterSpec[], draft: Record<string, string>): { values: Record<string, number> | null; error: string | null } {
+  const values: Record<string, number> = {};
+  for (const spec of specs) {
+    const text = draft[spec.name] ?? '', value = Number(text), label = spec.label || spec.name;
+    if (!text.trim() || !Number.isFinite(value) || value < spec.min || value > spec.max) return { values: null, error: `${label} must be from ${spec.min} to ${spec.max}.` };
+    if (spec.integer && !Number.isInteger(value)) return { values: null, error: `${label} must be a whole number.` };
+    values[spec.name] = value;
+  }
+  return { values, error: null };
+}
+
+/** A tutor-written experiment: the learner turns its declared knobs and re-runs the same code. */
+function SandboxLab({ run, onRun, blockInputs, onStale }: { run: ExperimentRun; onRun: (values: Record<string, number>) => Promise<void>; blockInputs: boolean; onStale: (stale: boolean) => void }) {
+  const specs: SandboxParameterSpec[] = run.parameters.parameter_specs || [];
+  const values: Record<string, number> = run.parameters.values || {};
+  const [draft, setDraft] = useState<Record<string, string>>(() => Object.fromEntries(specs.map(spec => [spec.name, String(values[spec.name] ?? spec.value)])));
+  const [runError, setRunError] = useState<string | null>(null);
+  const parsed = parseKnobs(specs, draft);
+  const stale = !parsed.values || specs.some(spec => parsed.values![spec.name] !== values[spec.name]);
+  useEffect(() => { onStale(stale); }, [stale, onStale]);
+  const output = (run.output || {}) as SandboxOutput, verified = isChecked(run);
+  const claims = run.checks.filter(check => check.name.startsWith('claim: '));
+  return <>
+    <p className="experiment-question"><strong className="sandbox-title">{String(run.parameters.title || 'Experiment')}</strong>{String(run.parameters.question || '')}</p>
+    {specs.length > 0 && <form className="params-form" onSubmit={async event => {
+      event.preventDefault(); if (!parsed.values || blockInputs) return;
+      setRunError(null);
+      try { await onRun(parsed.values); } catch (error) { setRunError(error instanceof Error ? error.message : 'The experiment did not finish. Earlier results still use their original inputs.'); }
+    }}>
+      <fieldset disabled={blockInputs}><div className="knob-grid">{specs.map(spec => <div className="form-group" key={spec.name}><label htmlFor={`knob-${spec.name}`}>{spec.label || spec.name.replaceAll('_', ' ')} <span>{spec.min}–{spec.max}</span></label><input id={`knob-${spec.name}`} type="number" min={spec.min} max={spec.max} step={spec.step ?? (spec.integer ? 1 : 'any')} value={draft[spec.name] ?? ''} onChange={event => setDraft(previous => ({ ...previous, [spec.name]: event.target.value }))} required/></div>)}</div></fieldset>
+      {parsed.error && <p className="inline-error" role="status">{parsed.error}</p>}
+      <button className="run-button" type="submit" disabled={blockInputs || !parsed.values}><Icon name={blockInputs ? 'spark' : 'play'} size={16}/>{blockInputs ? 'Working…' : 'Run with my settings'}<Icon name="arrow" size={16}/></button>
+      {runError && <p className="inline-error" role="alert">{runError}</p>}
+    </form>}
+    <div className="run-results">
+      <div className="results-header"><span className={'result-status ' + (stale && specs.length ? 'stale' : verified ? 'verified' : 'failed')}><Icon name={verified && !stale ? 'check' : 'info'} size={14}/>{stale && specs.length ? 'Earlier inputs' : verified ? 'Measured result' : 'Run did not finish'}</span><span className="run-id" title={run.run_id}>Run {run.run_id.slice(0, 8)}</span></div>
+      {stale && specs.length > 0 && <p className="stale-notice">These results use the earlier inputs. Run the experiment to update them.</p>}
+      {verified ? <>
+        {output.summary && <p className="sandbox-summary">{output.summary}</p>}
+        {Object.keys(output.metrics || {}).length > 0 && <div className="result-stats sandbox-metrics">{Object.entries(output.metrics || {}).slice(0, 8).map(([name, value]) => <div key={name}><span>{name.replaceAll('_', ' ')}</span><strong>{formatValue(value)}</strong></div>)}</div>}
+        {output.table && output.table.rows.length > 0 && <div className="table-wrapper"><table className="results-table"><thead><tr>{output.table.columns.map(column => <th scope="col" key={column}>{column}</th>)}</tr></thead><tbody>{output.table.rows.map((row, index) => <tr key={index}>{row.map((cell, cellIndex) => cellIndex === 0 ? <th scope="row" key={cellIndex}>{formatValue(cell)}</th> : <td key={cellIndex}>{formatValue(cell)}</td>)}</tr>)}</tbody></table></div>}
+        {claims.length > 0 && <ul className="claim-list">{claims.map(claim => <li key={claim.name} className={claim.status}><strong>{claim.status === 'passed' ? '✓' : '×'} {claim.name.slice(7)}</strong>{claim.detail && <span>{claim.detail}</span>}</li>)}</ul>}
+      </> : <p className="inline-error">{output.error || 'This run did not produce a result.'}</p>}
+      <details className="run-evidence"><summary><Icon name="flask" size={14}/>See the experiment code<Icon name="chevron" size={13}/></summary><pre className="code-block"><code>{String(run.parameters.code || '')}</code></pre></details>
+      {output.stdout && <details className="run-evidence"><summary><Icon name="info" size={14}/>Printed output<Icon name="chevron" size={13}/></summary><pre className="code-block">{output.stdout}</pre></details>}
+      <RunEvidence run={run}/>
+    </div>
+  </>;
 }
 const RECIPES = [
   { id: 'attention_scaling_v1', name: 'Scaling', description: 'What happens to score variance as the key dimension grows?' },
@@ -27,11 +88,15 @@ function integer(text: string, min: number, max: number, label: string) {
 }
 export function ExperimentPanel(props: ExperimentPanelProps) {
   // A committed new run initializes the draft from its retained parameters.
-  return <ExperimentDraft key={props.activeRun?.run_id || 'empty'} {...props}/>;
+  return <ExperimentDraft key={(props.activeRun?.run_id || 'empty') + (props.lessonKind || '')} {...props}/>;
 }
-function ExperimentDraft({ activeRun, onRunRecipe, isLoading, disabled = false, onStaleChange }: ExperimentPanelProps) {
-  const p = activeRun?.parameters || {};
-  const [recipe, setRecipe] = useState(activeRun?.recipe_id || 'attention_scaling_v1');
+function ExperimentDraft({ activeRun, onRunRecipe, isLoading, disabled = false, onStaleChange, lessonKind = 'attention_lab' }: ExperimentPanelProps) {
+  const sandboxRun = activeRun?.recipe_id === SANDBOX_RECIPE ? activeRun : null;
+  const reviewedRun = sandboxRun ? null : activeRun;
+  const p = reviewedRun?.parameters || {};
+  const [recipe, setRecipe] = useState(activeRun?.recipe_id || (lessonKind === 'open' ? SANDBOX_RECIPE : 'attention_scaling_v1'));
+  const [sandboxStale, setSandboxStale] = useState(false);
+  const tabs = [...(sandboxRun ? [{ id: SANDBOX_RECIPE, name: 'Tutor’s lab', description: '' }] : []), ...(lessonKind === 'open' ? [] : RECIPES)];
   const [dimensions, setDimensions] = useState<string>((p.dimensions || [8, 32, 128]).join(', '));
   const [nKeys, setNKeys] = useState(String(p.n_keys ?? 8));
   const [trials, setTrials] = useState(String(p.trials ?? 50));
@@ -65,17 +130,20 @@ function ExperimentDraft({ activeRun, onRunRecipe, isLoading, disabled = false, 
       return { parameters, error: null };
     } catch (error) { return { parameters: null, error: error instanceof Error ? error.message : 'Check your inputs.' }; }
   }, [recipe, dimensions, nKeys, trials, seed, logits, multiplier, scores]);
-  const stale = Boolean(activeRun && (recipe !== activeRun.recipe_id || !parsed.parameters || canonical(parsed.parameters) !== canonical(activeRun.parameters)));
+  const inSandbox = recipe === SANDBOX_RECIPE;
+  const stale = inSandbox ? sandboxStale : Boolean(activeRun && (recipe !== activeRun.recipe_id || !parsed.parameters || canonical(parsed.parameters) !== canonical(activeRun.parameters)));
   useEffect(() => { onStaleChange(stale); }, [stale, onStaleChange]);
-  const selected = RECIPES.find(item => item.id === recipe)!;
-  const verified = activeRun?.status === 'succeeded' && activeRun.output && activeRun.checks.length > 0 && activeRun.checks.every(check => check.status !== 'failed');
+  const selected = RECIPES.find(item => item.id === recipe) || RECIPES[0];
+  const verified = reviewedRun?.status === 'succeeded' && reviewedRun.output && reviewedRun.checks.length > 0 && reviewedRun.checks.every(check => check.status !== 'failed');
   const blockInputs = isLoading || disabled;
 
   return <div className="panel experiment-panel">
     <div className="panel-header"><div className="title-row"><Icon name="flask" size={18}/><h2>The experiment lab</h2></div><span className="panel-number">02</span></div>
     <p className="panel-description">A small experiment. A real observation.</p>
-    <div className="recipe-tabs" role="group" aria-label="Experiment recipe">{RECIPES.map(item => <button key={item.id} className={'tab-btn ' + (recipe === item.id ? 'active' : '')} aria-pressed={recipe === item.id} onClick={() => { setRecipe(item.id); setRunError(null); }} disabled={isLoading}>{item.name}</button>)}</div>
-    <p className="experiment-question">{selected.description}</p>
+    {tabs.length > 1 && <div className="recipe-tabs" role="group" aria-label="Experiment recipe">{tabs.map(item => <button key={item.id} className={'tab-btn ' + (recipe === item.id ? 'active' : '')} aria-pressed={recipe === item.id} onClick={() => { setRecipe(item.id); setRunError(null); }} disabled={isLoading}>{item.name}</button>)}</div>}
+    {inSandbox ? (sandboxRun ? <SandboxLab run={sandboxRun} blockInputs={blockInputs} onStale={setSandboxStale} onRun={values => onRunRecipe(SANDBOX_RECIPE, values, sandboxRun.run_id)}/>
+      : <p className="experiment-question">{disabled ? 'Open a lesson to start experimenting.' : 'The tutor builds a small experiment for this paper as the lesson goes. Ask it to test an idea you are unsure about.'}</p>)
+    : <><p className="experiment-question">{selected.description}</p>
     <form className="params-form" onSubmit={async event => {
       event.preventDefault(); if (!parsed.parameters || blockInputs) return;
       setRunError(null);
@@ -93,16 +161,16 @@ function ExperimentDraft({ activeRun, onRunRecipe, isLoading, disabled = false, 
       {disabled && <p className="field-help centered">Open a lesson to start experimenting.</p>}
       {runError && <p className="inline-error" role="alert">{runError}</p>}
     </form>
-    {activeRun && <div className="run-results">
-      <div className="results-header"><span className={'result-status ' + (stale ? 'stale' : verified ? 'verified' : 'failed')}><Icon name={verified && !stale ? 'check' : 'info'} size={14}/>{stale ? 'Earlier inputs' : verified ? 'Checked result' : 'Result unavailable'}</span><span className="run-id" title={activeRun.run_id}>Run {activeRun.run_id.slice(0, 8)}</span></div>
+    {reviewedRun && <div className="run-results">
+      <div className="results-header"><span className={'result-status ' + (stale ? 'stale' : verified ? 'verified' : 'failed')}><Icon name={verified && !stale ? 'check' : 'info'} size={14}/>{stale ? 'Earlier inputs' : verified ? 'Checked result' : 'Result unavailable'}</span><span className="run-id" title={reviewedRun.run_id}>Run {reviewedRun.run_id.slice(0, 8)}</span></div>
       {stale && <p className="stale-notice">These results use the earlier inputs. Run the experiment to update them.</p>}
-      <span className="eyebrow">{RECIPES.find(item => item.id === activeRun.recipe_id)?.name} · OBSERVATION</span>
-      {verified && activeRun.recipe_id === 'attention_scaling_v1' && <div className="table-wrapper"><table className="results-table"><caption className="visually-hidden">Score variance from the retained run</caption><thead><tr><th scope="col">dₖ</th><th scope="col">Unscaled</th><th scope="col">Scaled</th></tr></thead><tbody>{activeRun.output.results.map((row: { dimension: number; unscaled_variance: number; scaled_variance: number }) => <tr key={row.dimension}><th scope="row">{row.dimension}</th><td className="unscaled-value">{row.unscaled_variance.toFixed(2)}</td><td className="scaled-value">{row.scaled_variance.toFixed(3)}</td></tr>)}</tbody></table><p className="field-help">Score variance · both series use the same scale</p></div>}
-      {verified && activeRun.recipe_id === 'softmax_sensitivity_v1' && <div className="result-stats"><div><span>Original entropy</span><strong>{activeRun.output.base_entropy.toFixed(3)} <small>nats</small></strong></div><div><span>Scaled entropy</span><strong>{activeRun.output.scaled_entropy.toFixed(3)} <small>nats</small></strong></div></div>}
-      {verified && activeRun.recipe_id === 'causal_masking_v1' && <div className="table-wrapper"><table className="matrix-table"><caption>Attention weights · future positions excluded</caption><tbody>{activeRun.output.masked_weights.map((row: number[], i: number) => <tr key={i}>{row.map((value: number, j: number) => <td key={j} className={j > i ? 'cell-forbidden' : 'cell-allowed'}>{value.toFixed(3)}</td>)}</tr>)}</tbody></table></div>}
+      <span className="eyebrow">{RECIPES.find(item => item.id === reviewedRun.recipe_id)?.name} · OBSERVATION</span>
+      {verified && reviewedRun.recipe_id === 'attention_scaling_v1' && <div className="table-wrapper"><table className="results-table"><caption className="visually-hidden">Score variance from the retained run</caption><thead><tr><th scope="col">dₖ</th><th scope="col">Unscaled</th><th scope="col">Scaled</th></tr></thead><tbody>{reviewedRun.output.results.map((row: { dimension: number; unscaled_variance: number; scaled_variance: number }) => <tr key={row.dimension}><th scope="row">{row.dimension}</th><td className="unscaled-value">{row.unscaled_variance.toFixed(2)}</td><td className="scaled-value">{row.scaled_variance.toFixed(3)}</td></tr>)}</tbody></table><p className="field-help">Score variance · both series use the same scale</p></div>}
+      {verified && reviewedRun.recipe_id === 'softmax_sensitivity_v1' && <div className="result-stats"><div><span>Original entropy</span><strong>{reviewedRun.output.base_entropy.toFixed(3)} <small>nats</small></strong></div><div><span>Scaled entropy</span><strong>{reviewedRun.output.scaled_entropy.toFixed(3)} <small>nats</small></strong></div></div>}
+      {verified && reviewedRun.recipe_id === 'causal_masking_v1' && <div className="table-wrapper"><table className="matrix-table"><caption>Attention weights · future positions excluded</caption><tbody>{reviewedRun.output.masked_weights.map((row: number[], i: number) => <tr key={i}>{row.map((value: number, j: number) => <td key={j} className={j > i ? 'cell-forbidden' : 'cell-allowed'}>{value.toFixed(3)}</td>)}</tr>)}</tbody></table></div>}
       {!verified && <p className="inline-error">This run did not produce a verified result. Try again with valid inputs.</p>}
-      <details className="run-evidence"><summary><Icon name="shield" size={14}/>{activeRun.checks.filter(check => check.status === 'passed').length}/{activeRun.checks.filter(check => check.status !== 'not_applicable').length} checks passed{activeRun.checks.some(check => check.status === 'not_applicable') ? ` · ${activeRun.checks.filter(check => check.status === 'not_applicable').length} not applicable` : ''} · inspect evidence<Icon name="chevron" size={13}/></summary><div className="evidence-details"><h3>Numerical checks</h3>{activeRun.checks.map(check => <div key={check.name} className={'check-item ' + check.status}><strong>{check.status === 'passed' ? '✓' : check.status === 'failed' ? '×' : '—'} {check.name.replaceAll('_', ' ')}</strong><p>{check.detail}</p></div>)}<h3>Experiment assumptions</h3>{activeRun.assumptions.map(item => <p key={item}>{item}</p>)}<h3>Exact retained inputs</h3><pre>{JSON.stringify(activeRun.parameters, null, 2)}</pre><p>Run: <code>{activeRun.run_id}</code></p><p>Runner: <code>{activeRun.runner_digest}</code> · NumPy {activeRun.numpy_version}</p></div></details>
-    </div>}
-    <div className="lab-footnote"><Icon name="info" size={14}/><p>Synthetic inputs, real calculations. An illustration of the mechanism, not a paper’s benchmark.</p></div>
+      <RunEvidence run={reviewedRun}/>
+    </div>}</>}
+    <div className="lab-footnote"><Icon name="info" size={14}/><p>{inSandbox ? 'Tutor-written code, run in an isolated sandbox you can inspect. Synthetic inputs, real calculations: an illustration of the mechanism, not the paper’s benchmark.' : 'Synthetic inputs, real calculations. An illustration of the mechanism, not a paper’s benchmark.'}</p></div>
   </div>;
 }

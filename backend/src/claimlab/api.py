@@ -69,6 +69,7 @@ from claimlab.models import (
     BudgetReservation,
 )
 from claimlab.numerics.runner import runner
+from claimlab.contracts.experiment import RecipeId
 from claimlab.learning.task_bank import TASK_REGISTRY
 from claimlab.security import (
     GUEST_COOKIE_NAME,
@@ -79,14 +80,33 @@ from claimlab.security import (
 )
 from claimlab.services.pdf_service import extract_pdf_content, create_anchors_for_text
 from claimlab.services.agent_orchestrator import (
+    TASK_KEY_EVENT,
     AgentOrchestrator,
     ProviderUnavailableError,
     experiment_run_record,
     latest_tutor_step,
+    lesson_kind_for,
+)
+from claimlab.services.lesson_builder import paginate_text
+from claimlab.services.sandbox_runs import SandboxSpecError, execute_sandbox_experiment
+
+# Exceeds a bounded live tool loop: research, sandbox runs, and the final lesson call.
+TUTOR_TURN_LEASE = timedelta(seconds=300)
+
+# Mechanism terms of the reviewed labs. A paper that merely uses an attention layer rarely names two;
+# "key" alone is excluded because ordinary prose ("key findings") is full of it.
+ATTENTION_LAB_TERMS = (
+    "softmax", "query", "queries", "keys", "d_k", "dot product", "dot-product", "inner product",
+    "causal mask", "masked", "self-attention", "scaled dot", "attention weight",
 )
 
-# Matches the default Job.deadline_seconds and exceeds a bounded live tool loop.
-TUTOR_TURN_LEASE = timedelta(seconds=180)
+
+def assess_topic(text: str) -> str:
+    """supported: the reviewed attention lab fits; open: the live tutor teaches it; unsupported otherwise."""
+    lower = text.lower()
+    if sum(term in lower for term in ATTENTION_LAB_TERMS) >= 2:
+        return "supported"
+    return "open" if settings.MODEL_MODE == "live" else "unsupported"
 
 # Initialize database tables
 Base.metadata.create_all(bind=engine)
@@ -338,6 +358,7 @@ def get_me(guest: GuestOwner = Depends(get_current_guest)):
             "max_pages": 50,
             "max_sessions": 5,
         },
+        web_research=settings.MODEL_MODE == "live" and bool(settings.TINYFISH_API_KEY),
     )
 
 
@@ -654,9 +675,7 @@ def create_selection(
         raise HTTPException(status_code=422, detail={"code": "PARAMETERS_INVALID", "message": "Selected text exceeds 30,000 characters limit"})
 
     # Topic assessment boundary check (T-TUTOR-01)
-    lower_text = combined_text.lower()
-    is_supported_topic = any(k in lower_text for k in ["attention", "softmax", "query", "key", "scaling", "mask"])
-    topic_assessment = "supported" if is_supported_topic else "unsupported"
+    topic_assessment = assess_topic(combined_text)
 
     content_hash = hashlib.sha256(combined_text.encode("utf-8")).hexdigest()
     cached = handle_idempotency(db, guest.id, "create_selection", idempotency_key, {"doc_id": document_id, "start": req.page_start, "end": req.page_end, "hash": content_hash, "question": req.question})
@@ -738,7 +757,8 @@ def create_learning_session(
     selection = db.query(SourceSelection).filter(SourceSelection.id == req.selection_id, SourceSelection.owner_id == guest.id).first()
     if not selection:
         raise HTTPException(status_code=404, detail={"code": "RESOURCE_NOT_FOUND", "message": "Selection not found"})
-    if selection.topic_assessment != "supported":
+    # Open lessons need the live tutor; fixture mode teaches only the reviewed attention lab.
+    if selection.topic_assessment != "supported" and not (selection.topic_assessment == "open" and settings.MODEL_MODE == "live"):
         raise HTTPException(status_code=422, detail={
             "code": "UNSUPPORTED_DOCUMENT",
             "message": "This source is outside the supported attention, softmax, and causal masking labs. Choose a relevant passage or try the example note.",
@@ -753,7 +773,7 @@ def create_learning_session(
         selection_id=req.selection_id,
         goal=req.goal or selection.question,
         preferences_json=json.dumps(req.preferences or {}),
-        active_concept="attention_scaling",
+        active_concept="attention_scaling" if selection.topic_assessment == "supported" else None,
         revision=1,
         active_job_id=job_id,
         expires_at=guest.expires_at,
@@ -865,6 +885,10 @@ def get_learning_session(
         latest_run_id=latest_run.id if latest_run else None,
         source_selection=source_selection,
         tutor_narration=latest_step.get("narration"),
+        tutor_steps=latest_step.get("steps") or paginate_text(latest_step.get("narration") or ""),
+        tutor_turn=latest_step.get("turn"),
+        web_sources=latest_step.get("web_sources") or [],
+        lesson_kind=lesson_kind_for(selection),
     )
 
 
@@ -997,10 +1021,26 @@ def execute_session_run(
     if "expected_revision" in req_body and req_body["expected_revision"] != session.revision:
         raise HTTPException(status_code=409, detail={"code": "REVISION_CONFLICT", "message": "The lesson changed. Refresh before running an experiment."})
 
-    try:
-        run_res = runner.run(recipe_id, parameters)
-    except Exception as e:
-        raise HTTPException(status_code=422, detail={"code": "PARAMETERS_INVALID", "message": str(e)})
+    if recipe_id == RecipeId.SANDBOX_PYTHON.value:
+        # Learners change only the knobs a retained tutor experiment declared; code never comes from the client.
+        base = db.query(ExperimentRun).filter(
+            ExperimentRun.id == str(req_body.get("base_run_id") or ""),
+            ExperimentRun.session_id == session_id,
+            ExperimentRun.owner_id == guest.id,
+            ExperimentRun.recipe_id == recipe_id,
+        ).first()
+        if not base:
+            raise HTTPException(status_code=404, detail={"code": "RESOURCE_NOT_FOUND", "message": "Experiment not found"})
+        spec = {key: value for key, value in json.loads(base.parameters_json).items() if key != "values"}
+        try:
+            run_res = execute_sandbox_experiment(spec, parameters if isinstance(parameters, dict) else {})
+        except SandboxSpecError as e:
+            raise HTTPException(status_code=422, detail={"code": "PARAMETERS_INVALID", "message": str(e)})
+    else:
+        try:
+            run_res = runner.run(recipe_id, parameters)
+        except Exception as e:
+            raise HTTPException(status_code=422, detail={"code": "PARAMETERS_INVALID", "message": str(e)})
 
     job_id = str(uuid.uuid4())
     db.add(experiment_run_record(run_res, guest.id, session_id, job_id))
@@ -1093,7 +1133,7 @@ async def stream_job_events(
             # Query new events
             events = (
                 db.query(JobEvent)
-                .filter(JobEvent.job_id == job_id, JobEvent.sequence > last_seq)
+                .filter(JobEvent.job_id == job_id, JobEvent.sequence > last_seq, JobEvent.event_type != TASK_KEY_EVENT)
                 .order_by(JobEvent.sequence.asc())
                 .all()
             )
