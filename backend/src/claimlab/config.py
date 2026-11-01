@@ -1,5 +1,6 @@
 """Configuration and environment settings for ClaimLab."""
 from pathlib import Path
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -41,6 +42,12 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @model_validator(mode="after")
+    def validate_production_invariants(self) -> "Settings":
+        if self.APP_ENV != "development" and self.SESSION_SECRET == "dev-secret-change-in-production-min-32-chars-long!":
+            raise ValueError("SESSION_SECRET must be set to a secure secret outside development.")
+        return self
 
     @property
     def data_path(self) -> Path:

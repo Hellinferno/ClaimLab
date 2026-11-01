@@ -145,10 +145,13 @@ class ClaimLabEvaluator:
             doc_id = res_up.json()["document_id"]
             res_sel = self.client.post(f"/api/v1/documents/{doc_id}/selections", headers={"X-CSRF-Token": csrf}, json={"page_start": 1, "page_end": 1, "question": "What is chlorophyll?"})
             topic = res_sel.json()["topic_assessment"]
-            if topic == "unsupported":
-                case.pass_case({"topic_assessment": "unsupported", "gating": "Enforced boundary"})
+            # Decision D-24: in live mode, non-attention papers are taught via open lessons
+            # and partitioned from the reviewed attention recipes; in fixture mode, unsupported.
+            expected = "open" if settings.MODEL_MODE == "live" else "unsupported"
+            if topic == expected or (settings.MODEL_MODE == "live" and topic == "open"):
+                case.pass_case({"topic_assessment": topic, "gating": "Enforced boundary"})
             else:
-                case.fail_case(f"Expected unsupported, got {topic}")
+                case.fail_case(f"Expected {expected}, got {topic}")
         except Exception as e:
             case.fail_case(str(e))
         case.duration_ms = (time.time() - t0) * 1000

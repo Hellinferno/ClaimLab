@@ -33,7 +33,7 @@ function LessonPager({ steps, stepIndex, onStepChange, webSources, hasTask }: { 
     <div className="pager-head"><span className="eyebrow">STEP {index + 1} OF {steps.length}</span><span className={'epistemic-badge ' + step.tag + '-tag'}>{TAG_LABELS[step.tag] || 'Background'}</span></div>
     <div aria-live="polite">
       <h3 className="step-title"><InlineMarkdown text={step.title}/></h3>
-      <div className="tutor-body"><Markdown text={step.body}/></div>
+      <div className="tutor-body"><Markdown text={step.body} allowedUrls={webSources.map(s => s.url)}/></div>
       {step.url && <p className="step-cite"><a href={step.url} target="_blank" rel="noopener noreferrer"><Icon name="book" size={12}/>{hostname(step.url)}</a></p>}
       {!step.url && step.anchor_id && <p className="step-cite"><Icon name="book" size={12}/>Quoted from your selected passage</p>}
     </div>

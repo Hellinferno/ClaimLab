@@ -326,3 +326,49 @@ Each new regression was confirmed to fail with its fix reverted.
 **Unresolved:** live latency is still dominated by model generation (the final `present_lesson` reply takes 12-23 s); streaming the lesson or running turns as background jobs with progressive display would be the next step. The tutor sometimes repeats the same check after a wrong answer instead of a new variant. Turn times above are single observations, not percentiles.
 
 **Next dependency-ready step:** observe a live written-answer turn to confirm `assess_answer` and `present_lesson` arrive in one reply; then commit the working tree and verify sandbox isolation on Linux CI before any hosted release.
+
+
+---
+
+## Progress Entry: 1 November 2026 — Research implementations, provider hardening, claim verdicts, and security invariants
+
+**Repository/environment:** `main` on GitHub (`Hellinferno/ClaimLab.git`); Python 3.12 virtualenv, Node 22/24. All research recommendations from `reports/ClaimLab tutor improvement research.md` and related notes reviewed and implemented.
+
+**Key implementations:**
+1. **Provider Hardening & Telemetry:**
+   - Logged per-round token accounting (`prompt_tokens`, `completion_tokens`, `reasoning_tokens`, `cached_tokens`) and duration in `agent_orchestrator.py`.
+   - Fixed Meta API parameter incompatibility by removing mutually exclusive `max_tokens` when `max_completion_tokens: 8192` is present.
+   - Dynamic `reasoning_effort`: set to `"minimal"` on grading follow-ups and hint responses (`not measure`), cutting latency by ~20% and reasoning tokens from 119 to 51, while retaining `"low"` for measurement turns.
+   - Restricted model execution strictly to offered tools; bounded `read_web_page` exclusively to URLs discovered via `web_search` this turn.
+   - Added `APP_AI_BUDGET_USD` spend checks before allocating new live reservations.
+
+2. **Worker & SSE Event Stream Hardening:**
+   - Fixed `execute_job` in `worker.py` to re-query the job via `db.get(Job, job_id)` in the worker's session, eliminating `InvalidRequestError` from foreign-session `refresh()`. Extended heartbeat lease to 180s.
+   - Fixed `/api/v1/jobs/{job_id}/events` SSE generator in `api.py` to poll with short-lived `SessionLocal()` via `run_in_threadpool`, emit periodic `: keep-alive\n\n` comments every 15s to prevent proxy timeouts, and support `Last-Event-ID`.
+
+3. **Security Invariants & Boundaries:**
+   - In `executor.py`, missing dedicated `.sandbox-venv` fails closed outside `APP_ENV == "development"`.
+   - In `pdf_service.py`, added byte magic `%PDF-` check to reject malformed/non-PDF uploads before parser invocation.
+   - In `config.py`, added `@model_validator` ensuring `SESSION_SECRET` cannot use the default value outside development.
+   - In `session.py`, bounded `goal` (1000 chars) and `event_type` (100 chars).
+   - In `Markdown.tsx`, sanitized external markdown links against verified `web_sources`, rendering unverified injected URLs as safe plain text.
+
+4. **Pedagogy, Grading & Whiteboard Resilience:**
+   - Enhanced numerical grading in `lesson_builder.py` with fraction (`"1/2" -> 0.5`) and percentage (`"50%" -> 0.5`) parsing.
+   - Handled whiteboard chunk patch failures non-lossy by falling back to individual command execution so valid drawings are never dropped.
+   - In `ExperimentPanel.tsx`, added `ClaimVerdictCard` verifying empirical observations against exact citations from *Attention Is All You Need* (§3.2.1 and §3.2.3) with explicit mathematical tolerances, plus quick presets for standard reproduction vs. boundary testing.
+
+5. **UI & Submission Alignment:**
+   - Elevated typography rules from 8-10px to 11-12px minimum across `index.css`.
+   - Fixed mobile layout ordering under `@media (max-width: 1080px)` so `.lesson-context` (`order: -2`) and `.tutor-column` (`order: -1`) sit above the board.
+   - Made hint strategy box toggle immediately on click in `TaskCard.tsx`.
+   - Updated `docs/SUBMISSION_KIT.md` and `README.md` to reflect the "Push the Frontier" theme, "Indie Developer" track, and 125 total system tests.
+
+**Verification Results:**
+- `pytest backend/tests -m "not live_meta"`: **123 passed, 2 deselected**.
+- `pytest backend/tests -m live_meta`: **2 passed** against live `muse-spark-1.3`.
+- `python -m claimlab.evaluation.benchmark`: **12/12 passed (100%)**.
+- `ruff check backend`: **0 errors**.
+- `npm --prefix frontend run lint`: **0 warnings, 0 errors**.
+- `npm --prefix frontend run build`: **0 errors** (production Vite bundle built in 1.38s).
+- GitHub Actions CI: **Green** (both `Backend Tests & Lint` and `Frontend Build & Lint` passed).

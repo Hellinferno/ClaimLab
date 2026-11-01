@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
 import httpx
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from claimlab.config import settings
@@ -743,6 +744,16 @@ class AgentOrchestrator:
             )},
         ]
 
+        # Check spending limit before creating new reservation
+        total_spent = (
+            self.db.query(func.sum(BudgetReservation.settled_amount_usd))
+            .filter(BudgetReservation.owner_id == session.owner_id)
+            .scalar() or 0.0
+        )
+        if total_spent >= settings.APP_AI_BUDGET_USD:
+            logger.warning("Owner %s reached AI budget limit ($%.2f >= $%.2f)", session.owner_id, total_spent, settings.APP_AI_BUDGET_USD)
+            raise ProviderUnavailableError("You have reached the AI teaching budget limit for this session.")
+
         # Budget reservation (tracking expected costs)
         budget = BudgetReservation(
             owner_id=session.owner_id,
@@ -812,7 +823,7 @@ class AgentOrchestrator:
                     "tools": offered_tool_specs,
                     "tool_choice": "auto",
                     "max_completion_tokens": 8192,
-                    "reasoning_effort": "minimal" if (needs_assessment and model_assessment is None and not measure) else "low",
+                    "reasoning_effort": "minimal" if ((needs_assessment or reviewed_verdict is not None or requested_hint) and not measure) else "low",
                 }
 
                 data = None
@@ -1199,10 +1210,14 @@ class AgentOrchestrator:
         elif answered:
             # Reviewed task-bank progression decides what follows an answer; none
             # remains once the sequence is complete, as in fixture turns.
-            active_task = graded_task or model_task
+            active_task = graded_task or (model_task if lesson_kind == "open" else None)
         else:
-            # Questions and other help keep the learner's current task.
-            active_task = model_task or previous_task or (dict(DEFAULT_TASK) if lesson_kind == "attention_lab" else None)
+            # In the reviewed attention lab, the curated task bank drives progression.
+            # In open lessons, the tutor-generated check question is active.
+            if lesson_kind == "attention_lab":
+                active_task = previous_task or dict(DEFAULT_TASK)
+            else:
+                active_task = model_task or previous_task
         if model_task_key and active_task is model_task:
             active_key = model_task_key
             session.active_concept = model_task_key["concept_id"]
