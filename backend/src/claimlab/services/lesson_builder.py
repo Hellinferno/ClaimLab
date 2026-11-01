@@ -204,13 +204,18 @@ def board_bottom(objects: Iterable[BoardObject]) -> float:
 
 
 def apply_commands(scene: SceneGraph, commands: List[Any]) -> SceneGraph:
-    """Apply commands in engine-sized atomic chunks; an invalid chunk is skipped, never half-applied."""
+    """Apply commands in engine-sized atomic chunks; if a chunk fails, try commands individually to preserve valid ones."""
     for start in range(0, len(commands), MAX_COMMANDS_PER_PATCH):
         chunk = commands[start:start + MAX_COMMANDS_PER_PATCH]
         try:
             scene = apply_atomic_patch(scene, BoardPatch(schema_version=1, base_board_revision=scene.board_revision, commands=chunk))
         except Exception as exc:
-            logger.warning("Skipped invalid lesson board patch: %s", exc)
+            logger.warning("Chunk patch failed (%s); trying commands individually", exc)
+            for cmd in chunk:
+                try:
+                    scene = apply_atomic_patch(scene, BoardPatch(schema_version=1, base_board_revision=scene.board_revision, commands=[cmd]))
+                except Exception as inner_exc:
+                    logger.warning("Skipped individual invalid command: %s", inner_exc)
     return scene
 
 
@@ -479,12 +484,14 @@ def build_check(check: Any, revision: int) -> Tuple[Optional[Dict[str, Any]], Op
 def grade_open_answer(key: Dict[str, Any], answer: Any) -> Optional[bool]:
     """Deterministic verdict for number and choice checks; None means the tutor must assess it."""
     if key.get("answer_type") == "number":
-        value, expected = _first_number(answer), key.get("answer")
-        if value is None or not isinstance(expected, (int, float)):
+        expected = key.get("answer")
+        expected_val = float(expected) if isinstance(expected, (int, float)) else None
+        value = _first_number(answer, expected=expected_val)
+        if value is None or expected_val is None:
             return False
         tolerance = key.get("tolerance")
-        tolerance = tolerance if tolerance is not None else max(1e-6, 0.02 * abs(expected))
-        return math.isclose(value, expected, abs_tol=tolerance)
+        tolerance = tolerance if tolerance is not None else max(1e-6, 0.02 * abs(expected_val))
+        return math.isclose(value, expected_val, abs_tol=tolerance)
     if key.get("answer_type") == "choice":
         choices, index = key.get("choices") or [], _letter_index(answer)
         if index is not None and index < len(choices):
@@ -493,12 +500,39 @@ def grade_open_answer(key: Dict[str, Any], answer: Any) -> Optional[bool]:
     return None
 
 
-def _first_number(value: Any) -> Optional[float]:
+def _first_number(value: Any, expected: Optional[float] = None) -> Optional[float]:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
         return float(value) if math.isfinite(value) else None
-    match = re.search(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?", str(value or "").replace(",", ""))
+    text = str(value or "").replace(",", "").strip()
+
+    # Check for fraction pattern e.g. "1/2", "3 / 4", "-2/5"
+    frac_match = re.search(r"([-+]?\d+\.?\d*)\s*/\s*([-+]?\d+\.?\d*)", text)
+    if frac_match:
+        try:
+            num = float(frac_match.group(1))
+            den = float(frac_match.group(2))
+            if den != 0.0:
+                res = num / den
+                if math.isfinite(res):
+                    return res
+        except (ValueError, ZeroDivisionError):
+            pass
+
+    # Check for percentage pattern e.g. "50%", "12.5 %"
+    pct_match = re.search(r"([-+]?(?:\d+\.?\d*|\.\d+))\s*%", text)
+    if pct_match:
+        try:
+            val = float(pct_match.group(1))
+            # If expected is <= 1.0 (e.g. 0.5), convert percentage 50% -> 0.5
+            if expected is not None and abs(expected) <= 1.0:
+                return val / 100.0
+            return val
+        except ValueError:
+            pass
+
+    match = re.search(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?", text)
     return float(match.group()) if match else None
 
 

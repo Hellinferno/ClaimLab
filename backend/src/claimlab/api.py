@@ -48,7 +48,8 @@ from claimlab.contracts import (
     JobStatus,
     EvidenceCategory,
 )
-from claimlab.database import Base, engine, get_db
+from starlette.concurrency import run_in_threadpool
+from claimlab.database import Base, engine, get_db, SessionLocal
 from claimlab.models import (
     GuestOwner,
     Document as DBDocument,
@@ -220,7 +221,9 @@ def execute_tutor_job(db: Session, session: LearningSession, job: Job, trigger_e
             session.active_job_id = None
         db.commit()
         raise HTTPException(status_code=503, detail={"code": job.error_code, "message": job.error_message}) from exc
-    job.status = JobStatus.SUCCEEDED.value
+    db.refresh(job)
+    if not (job.cancelled or job.status == JobStatus.CANCELLED.value):
+        job.status = JobStatus.SUCCEEDED.value
     job.progress = 1.0
     if session.active_job_id == job.id:
         session.active_job_id = None
@@ -1119,6 +1122,7 @@ def get_job(
 async def stream_job_events(
     job_id: str,
     after: Optional[int] = None,
+    last_event_id: Optional[str] = Header(None, alias="Last-Event-ID"),
     guest: GuestOwner = Depends(get_current_guest),
     db: Session = Depends(get_db),
 ):
@@ -1128,24 +1132,45 @@ async def stream_job_events(
         raise HTTPException(status_code=404, detail={"code": "RESOURCE_NOT_FOUND", "message": "Job not found"})
 
     async def event_generator():
-        last_seq = after or 0
+        start_seq = after if after is not None else (int(last_event_id) if last_event_id and last_event_id.isdigit() else 0)
+        last_seq = start_seq
+        keep_alive_seconds = 15.0
+        loop = asyncio.get_event_loop()
+        last_ping = loop.time()
         while True:
-            # Query new events
-            events = (
-                db.query(JobEvent)
-                .filter(JobEvent.job_id == job_id, JobEvent.sequence > last_seq, JobEvent.event_type != TASK_KEY_EVENT)
-                .order_by(JobEvent.sequence.asc())
-                .all()
-            )
-            for ev in events:
-                last_seq = ev.sequence
-                yield f"id: {ev.sequence}\nevent: {ev.event_type}\ndata: {ev.payload_json}\n\n"
+            def fetch_events_and_status():
+                with SessionLocal() as poll_db:
+                    j = poll_db.query(Job).filter(Job.id == job_id, Job.owner_id == guest.id).first()
+                    if not j:
+                        return None, []
+                    evs = (
+                        poll_db.query(JobEvent).filter(JobEvent.job_id == job_id, JobEvent.sequence > last_seq, JobEvent.event_type != TASK_KEY_EVENT)
+        
+                        .order_by(JobEvent.sequence.asc())
+                        .all()
+                    )
+                    ev_tuples = [(e.sequence, e.event_type, e.payload_json) for e in evs]
+                    return j.status, ev_tuples
 
-            # Check if job reached terminal status
-            db.refresh(job)
-            if job.status in (JobStatus.SUCCEEDED.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value, JobStatus.TIMED_OUT.value):
-                yield f"event: job_finished\ndata: {{\"status\": \"{job.status}\"}}\n\n"
+            status_val, ev_list = await run_in_threadpool(fetch_events_and_status)
+            if status_val is None:
                 break
+
+            for seq, ev_type, payload_json in ev_list:
+                last_seq = seq
+                yield f"id: {seq}\nevent: {ev_type}\ndata: {payload_json}\n\n"
+
+            if status_val in (JobStatus.SUCCEEDED.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value, JobStatus.TIMED_OUT.value):
+                yield f"event: job_finished\ndata: {{\"status\": \"{status_val}\"}}\n\n"
+                break
+
+            now = loop.time()
+            if now - last_ping >= keep_alive_seconds:
+                yield ": keep-alive\n\n"
+                last_ping = now
+
+
+
 
             await asyncio.sleep(0.5)
 

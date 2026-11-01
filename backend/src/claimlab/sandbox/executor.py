@@ -382,6 +382,8 @@ def run_python_experiment(
     except SandboxPolicyError as exc:
         return finish("rejected", error=str(exc))
     if info["environment"] != "sandbox-venv":
+        if settings.APP_ENV != "development":
+            return finish("failed", error="Dedicated sandbox venv is required outside development mode.")
         _warn_fallback(info)
 
     with tempfile.TemporaryDirectory(prefix="claimlab-sandbox-", ignore_cleanup_errors=True) as workdir:

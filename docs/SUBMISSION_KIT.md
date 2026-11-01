@@ -4,7 +4,7 @@
 **Branch:** `main`  
 **License:** MIT  
 **Target Model:** Meta `muse-spark-1.3` (Live Function Calling & Orchestration)  
-**Verification Status:** 27/27 Pytest Tests Passed · 12/12 Behavioral Benchmark Cases Passed (100%)
+**Verification Status:** 125/125 Pytest Tests Passed · 12/12 Behavioral Benchmark Cases Passed (100%)
 
 ---
 
@@ -17,7 +17,7 @@
 *Source-grounded whiteboard teacher with live numerical attention experiments powered by Meta's muse-spark-1.3.*
 
 ### Track
-*Meta Global AI Developer Hackathon — Developer Tools & Education Track*
+*Meta Global AI Developer Hackathon — Theme: "Push the Frontier" · Track: Indie Developer*
 
 ### Primary Technology & Meta AI Backbone
 - **Meta AI Model:** `muse-spark-1.3`
@@ -59,6 +59,8 @@ ClaimLab integrates Meta's `muse-spark-1.3` model through a bounded, stateful to
 - **`run_experiment`:** Triggers deterministic numerical recipes with strict input validation and parameter normalizations.
 - **`present_teaching_step`:** Emits pedagogical explanations and atomic whiteboard patches (`add_object`, `highlight_objects`, `update_object`).
 - **Budget & Safety Enforcements:** Every turn reserves and settles token usage against an isolated user budget, enforces lease heartbeats, and provides graceful fallback to deterministic fixtures if provider connectivity is lost.
+- **Deep Telemetry & Token Accounting:** Tracks prompt tokens, completion tokens, reasoning tokens, and cached tokens per live call with wall-clock latency.
+- **Paper Claim-Check Verification:** Automatically verifies reproduced empirical claims against paper citations (§3.2.1, §3.2.3) with explicit mathematical tolerances.
 
 ---
 
@@ -68,7 +70,7 @@ All acceptance criteria across the specification suite pass with 100% verificati
 
 | Verification Suite | Result | Details |
 | :--- | :--- | :--- |
-| **Complete Pytest Suite** | **27/27 Passed** | Covers auth, atomic whiteboard engine, numerical invariants, CSRF, idempotency, data deletion, and live Meta API calls. |
+| **Complete Pytest Suite** | **125/125 Passed** | Covers auth, atomic whiteboard engine, numerical invariants, sandbox isolation, background workers, SSE events, CSRF, idempotency, data deletion, and live Meta API calls. |
 | **Live Provider Probe (`T-META-01`)** | **PASSED** | Live Meta API round-trip completed in ~2.6s with autonomous tool execution. |
 | **Live Orchestrator Loop (`T-META-02`)** | **PASSED** | End-to-end live tutor turn with tool call dispatch and session snapshot. |
 | **Official Evaluation Benchmark** | **12/12 Passed (100%)** | All 12 behavioral cases from `docs/12_EVALUATION_HARNESS.md` verified in both live and offline modes. |
@@ -131,7 +133,7 @@ Open [http://127.0.0.1:5173](http://127.0.0.1:5173) in your browser.
 
 ### 4. Run Full Verification Suite
 ```bash
-# Pytest (27/27 tests including live Meta probe)
+# Pytest (125/125 tests including live Meta probe)
 pytest backend/tests
 
 # Behavioral Evaluation Benchmark (12/12 cases)

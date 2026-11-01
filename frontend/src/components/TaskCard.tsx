@@ -53,7 +53,12 @@ function TutorWorking() {
     const timer = window.setInterval(() => setSeconds(value => value + 1), 1000);
     return () => window.clearInterval(timer);
   }, []);
-  return <p className="tutor-working" role="status"><span className="dot working"/>The tutor is reading your pages and writing an answer… {seconds > 0 && <span>{seconds} s</span>}</p>;
+  const phase = seconds < 3
+    ? 'Reading your pages and board…'
+    : seconds < 7
+    ? 'Checking source evidence and experiments…'
+    : 'Synthesizing lesson and diagram updates…';
+  return <p className="tutor-working" role="status"><span className="dot working"/>{phase} {seconds > 0 && <span>({seconds}s)</span>}</p>;
 }
 
 export function TaskCard({ task, onSubmitAnswer, onAskQuestion, onRequestHint, isLoading, working, steps, stepIndex, onStepChange, webSources, hasSession }: TaskCardProps) {
@@ -69,7 +74,7 @@ export function TaskCard({ task, onSubmitAnswer, onAskQuestion, onRequestHint, i
     {task ? <div className="task-content"><span className="eyebrow">CHECK YOUR UNDERSTANDING</span><p className="task-prompt"><InlineMarkdown text={task.question}/></p><form onSubmit={async event => { event.preventDefault(); if (!answer.trim() || isLoading) return; await onSubmitAnswer(answer.trim()); }}>
       {choices.length ? <><fieldset className="choice-group" disabled={isLoading}><legend className="visually-hidden">Choose an answer</legend>{choices.map(choice => <label key={choice} className={'choice-option' + (answer === choice ? ' selected' : '')}><input type="radio" name="task-choice" value={choice} checked={answer === choice} onChange={() => setAnswer(choice)}/><span><InlineMarkdown text={choice}/></span></label>)}</fieldset><button className="primary-button choice-submit" type="submit" disabled={isLoading || !answer}>{isLoading ? 'Thinking…' : 'Check my thinking'}<Icon name="arrow" size={16}/></button></>
         : <><label className="visually-hidden" htmlFor="task-answer">Your answer</label><div className="input-group"><input id="task-answer" name="answer" placeholder={task.expected_type === 'vector' ? 'e.g. 0.5, 0.5' : task.expected_type === 'number' ? 'Your calculation…' : 'Explain your answer…'} value={answer} onChange={event => setAnswer(event.target.value)} disabled={isLoading} autoComplete="off" required/><button className="primary-button" type="submit" disabled={isLoading || !answer.trim()}>{isLoading ? 'Thinking…' : 'Check my thinking'}<Icon name="arrow" size={16}/></button></div></>}
-    </form><button className="text-button hint-button" onClick={async () => { if (showStrategy) setShowStrategy(false); else if (await onRequestHint()) setShowStrategy(true); }} disabled={isLoading} aria-expanded={showStrategy}>{showStrategy ? 'Hide strategy' : 'A little help getting started?'}<Icon name="chevron" size={13}/></button>{showStrategy && <p className="task-hint-box"><span className="eyebrow">A STRATEGY, NOT AN ANSWER</span>{hint}</p>}</div>
+    </form><button className="text-button hint-button" onClick={async () => { if (showStrategy) setShowStrategy(false); else { setShowStrategy(true); await onRequestHint(); } }} disabled={isLoading} aria-expanded={showStrategy}>{showStrategy ? 'Hide strategy' : 'A little help getting started?'}<Icon name="chevron" size={13}/></button>{showStrategy && <p className="task-hint-box"><span className="eyebrow">A STRATEGY, NOT AN ANSWER</span>{hint}</p>}</div>
       : <p className="no-task-msg">{hasSession ? 'Explore a lab, or ask about a connection on the board.' : 'The tutor will meet you here with a question, a drawing, and a next step shaped by your work.'}</p>}
     {hasSession && <form className="ask-form" onSubmit={async event => { event.preventDefault(); if (!question.trim() || isLoading) return; if (await onAskQuestion(question.trim())) setQuestion(''); }}><label htmlFor="tutor-question">Something still unclear?</label><div className="input-group"><input id="tutor-question" placeholder="Ask about this idea…" value={question} onChange={event => setQuestion(event.target.value)} maxLength={1000} required disabled={isLoading}/><button className="icon-button" aria-label="Ask the tutor" type="submit" disabled={isLoading || !question.trim()}><Icon name="arrow" size={18}/></button></div></form>}
   </div>;

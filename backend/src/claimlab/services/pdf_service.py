@@ -33,6 +33,9 @@ def extract_pdf_content(file_bytes: bytes) -> PDFExtractionResult:
     if len(file_bytes) > MAX_PDF_BYTES:
         raise ValueError("Upload exceeds maximum size of 10 MiB")
 
+    if not file_bytes.startswith(b"%PDF-"):
+        raise ValueError("Invalid PDF format: missing %PDF- header")
+
     reader = PdfReader(io.BytesIO(file_bytes))
     page_count = len(reader.pages)
 

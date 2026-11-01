@@ -9,7 +9,7 @@ from claimlab.contracts.document import SourceSelectionResponse
 
 class CreateSessionRequest(StrictModel):
     selection_id: str
-    goal: Optional[str] = None
+    goal: Optional[str] = Field(None, max_length=1000)
     preferences: Optional[Dict[str, Any]] = Field(default_factory=dict)
 
 
@@ -22,7 +22,7 @@ class CreateSessionResponse(StrictModel):
 class SubmitLearnerEventRequest(StrictModel):
     schema_version: int = 1
     event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    event_type: str
+    event_type: str = Field(..., max_length=100)
     expected_revision: int
     payload: Dict[str, Any]
 

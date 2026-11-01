@@ -57,7 +57,13 @@ def search_web(query: str, domain_type: str = "web") -> List[Dict[str, Any]]:
         raise WebResearchError("Web search is unavailable right now.") from exc
     if response.status_code != 200:
         raise _error_for(response)
-    results = response.json().get("results") or []
+    try:
+        body = response.json()
+        results = body.get("results") if isinstance(body, dict) else []
+        results = results or []
+    except Exception as exc:
+        logger.warning("TinyFish search returned invalid JSON: %s", exc)
+        raise WebResearchError("Web search returned an unreadable response.") from exc
     return [
         {
             "title": str(item.get("title") or "")[:200],
@@ -66,7 +72,7 @@ def search_web(query: str, domain_type: str = "web") -> List[Dict[str, Any]]:
             "snippet": str(item.get("snippet") or "")[:400],
         }
         for item in results[:MAX_RESULTS]
-        if str(item.get("url") or "").startswith(("http://", "https://"))
+        if isinstance(item, dict) and str(item.get("url") or "").startswith(("http://", "https://"))
     ]
 
 
@@ -88,12 +94,21 @@ def fetch_page(url: str) -> Dict[str, Any]:
         raise WebResearchError("The page could not be read right now.") from exc
     if response.status_code != 200:
         raise _error_for(response)
-    body = response.json()
+    try:
+        body = response.json()
+        if not isinstance(body, dict):
+            raise ValueError("Expected dictionary response from fetch")
+    except Exception as exc:
+        logger.warning("TinyFish fetch returned invalid JSON: %s", exc)
+        raise WebResearchError("The page returned an unreadable response.") from exc
     results = body.get("results") or []
     if not results:
         errors = body.get("errors") or [{}]
-        raise WebResearchError(f"The page could not be read ({errors[0].get('error', 'unknown error')}).")
+        err_msg = errors[0].get('error', 'unknown error') if isinstance(errors[0], dict) else 'unknown error'
+        raise WebResearchError(f"The page could not be read ({err_msg}).")
     page = results[0]
+    if not isinstance(page, dict):
+        raise WebResearchError("The page returned an invalid result format.")
     text = page.get("text") if isinstance(page.get("text"), str) else ""
     return {
         "title": str(page.get("title") or "")[:200],

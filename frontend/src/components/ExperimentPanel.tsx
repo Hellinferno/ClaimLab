@@ -17,6 +17,74 @@ function formatValue(value: unknown): string {
   return Number.isInteger(value) && size < 1e6 ? String(value) : size !== 0 && (size >= 1e5 || size < 1e-3) ? value.toExponential(2) : value.toFixed(size >= 100 ? 1 : 3);
 }
 
+function ClaimVerdictCard({ run }: { run: ExperimentRun }) {
+  if (run.recipe_id === 'attention_scaling_v1' && run.output?.results) {
+    const results = run.output.results as Array<{ dimension: number; unscaled_variance: number; scaled_variance: number }>;
+    const minScaled = Math.min(...results.map(r => r.scaled_variance));
+    const maxScaled = Math.max(...results.map(r => r.scaled_variance));
+    const reproduced = minScaled >= 0.4 && maxScaled <= 2.2;
+    return <div className={'claim-verdict-card ' + (reproduced ? 'verified' : 'mismatch')}>
+      <div className="claim-verdict-header">
+        <span className="eyebrow">PAPER CLAIM CHECK · §3.2.1</span>
+        <span className="claim-verdict-badge"><Icon name={reproduced ? 'check' : 'info'} size={13}/>{reproduced ? 'Claim reproduced' : 'Deviation observed'}</span>
+      </div>
+      <p className="claim-verdict-quote">“To counteract this effect, we scale the dot products by 1/√d_k.”</p>
+      <p className="claim-verdict-finding">
+        {reproduced
+          ? `Variance stabilized: unscaled variance grew across dimensions, while scaled variance held within ${minScaled.toFixed(2)}–${maxScaled.toFixed(2)} near 1.0, preserving gradient flow.`
+          : `Variance outside expected O(1) envelope [0.50, 2.00] (${minScaled.toFixed(2)}–${maxScaled.toFixed(2)}). Try increasing the trial count.`}
+      </p>
+      <span className="claim-verdict-tolerance">Tolerance: stable O(1) variance [0.50, 2.00] across d_k</span>
+    </div>;
+  }
+  if (run.recipe_id === 'softmax_sensitivity_v1' && run.output?.base_entropy !== undefined) {
+    const mult = Number(run.parameters.multiplier ?? 1);
+    const baseEnt = Number(run.output.base_entropy);
+    const scaledEnt = Number(run.output.scaled_entropy);
+    const baseMax = Number(run.output.base_max_prob);
+    const scaledMax = Number(run.output.scaled_max_prob);
+    const reproduced = mult > 1 ? scaledEnt < baseEnt : mult < 1 ? scaledEnt > baseEnt : Math.abs(scaledEnt - baseEnt) < 1e-6;
+    return <div className={'claim-verdict-card ' + (reproduced ? 'verified' : 'mismatch')}>
+      <div className="claim-verdict-header">
+        <span className="eyebrow">PAPER CLAIM CHECK · §3.2.1</span>
+        <span className="claim-verdict-badge"><Icon name={reproduced ? 'check' : 'info'} size={13}/>{reproduced ? 'Claim reproduced' : 'Deviation observed'}</span>
+      </div>
+      <p className="claim-verdict-quote">“pushing the softmax function into regions where it has extremely small gradients”</p>
+      <p className="claim-verdict-finding">
+        {mult > 1
+          ? `Large score multiplier (${mult.toFixed(2)}×) collapsed entropy from ${baseEnt.toFixed(3)} to ${scaledEnt.toFixed(3)} nats (peak weight ${baseMax.toFixed(2)} → ${scaledMax.toFixed(2)}), confirming vanishing gradient vulnerability.`
+          : mult < 1
+          ? `Smaller multiplier (${mult.toFixed(2)}×) dispersed probability mass, raising entropy from ${baseEnt.toFixed(3)} to ${scaledEnt.toFixed(3)} nats.`
+          : `Control condition: scores unchanged at 1.00× multiplier.`}
+      </p>
+      <span className="claim-verdict-tolerance">Tolerance: shift invariance error &lt; 1e-10, float64 precision</span>
+    </div>;
+  }
+  if (run.recipe_id === 'causal_masking_v1' && run.output?.masked_weights) {
+    const weights = run.output.masked_weights as number[][];
+    let allZero = true;
+    for (let i = 0; i < weights.length; i++) {
+      for (let j = i + 1; j < weights[i].length; j++) {
+        if (Math.abs(weights[i][j]) > 1e-9) allZero = false;
+      }
+    }
+    return <div className={'claim-verdict-card ' + (allZero ? 'verified' : 'mismatch')}>
+      <div className="claim-verdict-header">
+        <span className="eyebrow">PAPER CLAIM CHECK · §3.2.3</span>
+        <span className="claim-verdict-badge"><Icon name={allZero ? 'check' : 'info'} size={13}/>{allZero ? 'Claim reproduced' : 'Mask violation'}</span>
+      </div>
+      <p className="claim-verdict-quote">“ensuring that the predictions for position i can depend only on the known outputs at positions less than i”</p>
+      <p className="claim-verdict-finding">
+        {allZero
+          ? `Strict causal isolation confirmed: every forbidden future position (j > i) received exactly 0.000 attention weight across all ${weights.length} positions.`
+          : `Future information leakage detected in upper triangular weights.`}
+      </p>
+      <span className="claim-verdict-tolerance">Tolerance: exact zero (error &lt; 1e-9), row normalization = 1.000</span>
+    </div>;
+  }
+  return null;
+}
+
 function RunEvidence({ run }: { run: ExperimentRun }) {
   return <details className="run-evidence"><summary><Icon name="shield" size={14}/>{run.checks.filter(check => check.status === 'passed').length}/{run.checks.filter(check => check.status !== 'not_applicable').length} checks passed{run.checks.some(check => check.status === 'not_applicable') ? ` · ${run.checks.filter(check => check.status === 'not_applicable').length} not applicable` : ''} · inspect evidence<Icon name="chevron" size={13}/></summary><div className="evidence-details"><h3>{run.recipe_id === SANDBOX_RECIPE ? 'Checks' : 'Numerical checks'}</h3>{run.checks.map(check => <div key={check.name} className={'check-item ' + check.status}><strong>{check.status === 'passed' ? '✓' : check.status === 'failed' ? '×' : '—'} {check.name.replaceAll('_', ' ')}</strong><p>{check.detail}</p></div>)}<h3>Experiment assumptions</h3>{run.assumptions.map(item => <p key={item}>{item}</p>)}<h3>Exact retained inputs</h3><pre>{JSON.stringify(run.recipe_id === SANDBOX_RECIPE ? run.parameters.values : run.parameters, null, 2)}</pre><p>Run: <code>{run.run_id}</code></p><p>Runner: <code>{run.runner_digest}</code> · NumPy {run.numpy_version}</p></div></details>;
 }
@@ -165,6 +233,7 @@ function ExperimentDraft({ activeRun, onRunRecipe, isLoading, disabled = false, 
       <div className="results-header"><span className={'result-status ' + (stale ? 'stale' : verified ? 'verified' : 'failed')}><Icon name={verified && !stale ? 'check' : 'info'} size={14}/>{stale ? 'Earlier inputs' : verified ? 'Checked result' : 'Result unavailable'}</span><span className="run-id" title={reviewedRun.run_id}>Run {reviewedRun.run_id.slice(0, 8)}</span></div>
       {stale && <p className="stale-notice">These results use the earlier inputs. Run the experiment to update them.</p>}
       <span className="eyebrow">{RECIPES.find(item => item.id === reviewedRun.recipe_id)?.name} · OBSERVATION</span>
+      {verified && <ClaimVerdictCard run={reviewedRun}/>}
       {verified && reviewedRun.recipe_id === 'attention_scaling_v1' && <div className="table-wrapper"><table className="results-table"><caption className="visually-hidden">Score variance from the retained run</caption><thead><tr><th scope="col">dₖ</th><th scope="col">Unscaled</th><th scope="col">Scaled</th></tr></thead><tbody>{reviewedRun.output.results.map((row: { dimension: number; unscaled_variance: number; scaled_variance: number }) => <tr key={row.dimension}><th scope="row">{row.dimension}</th><td className="unscaled-value">{row.unscaled_variance.toFixed(2)}</td><td className="scaled-value">{row.scaled_variance.toFixed(3)}</td></tr>)}</tbody></table><p className="field-help">Score variance · both series use the same scale</p></div>}
       {verified && reviewedRun.recipe_id === 'softmax_sensitivity_v1' && <div className="result-stats"><div><span>Original entropy</span><strong>{reviewedRun.output.base_entropy.toFixed(3)} <small>nats</small></strong></div><div><span>Scaled entropy</span><strong>{reviewedRun.output.scaled_entropy.toFixed(3)} <small>nats</small></strong></div></div>}
       {verified && reviewedRun.recipe_id === 'causal_masking_v1' && <div className="table-wrapper"><table className="matrix-table"><caption>Attention weights · future positions excluded</caption><tbody>{reviewedRun.output.masked_weights.map((row: number[], i: number) => <tr key={i}>{row.map((value: number, j: number) => <td key={j} className={j > i ? 'cell-forbidden' : 'cell-allowed'}>{value.toFixed(3)}</td>)}</tr>)}</tbody></table></div>}

@@ -368,6 +368,12 @@ class ClaimLabEvaluator:
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="ClaimLab Behavioral Evaluation Benchmark")
+    parser.add_argument("--mode", choices=["fixture", "live"], default="fixture", help="Evaluation mode (default: fixture)")
+    args = parser.parse_args()
+
+    settings.MODEL_MODE = args.mode
     evaluator = ClaimLabEvaluator()
     results = evaluator.run_all_cases()
 

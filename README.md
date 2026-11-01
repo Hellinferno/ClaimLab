@@ -27,7 +27,7 @@
 
 [![Meta AI](https://img.shields.io/badge/META%20AI-Developer%20Hackathon-7928CA?style=for-the-badge&logo=meta&logoColor=white)](https://meta.com)
 [![Model](https://img.shields.io/badge/NEURAL%20BACKBONE-muse--spark--1.3-00DFD8?style=for-the-badge&logo=meta&logoColor=black)](#-neural-orchestration--meta-muse-spark-13)
-[![Test Matrix](https://img.shields.io/badge/SYSTEM%20TESTS-121%20OFFLINE%20%2B%202%20LIVE%20PASSED-00F59B?style=for-the-badge&logo=pytest&logoColor=black)](#-system-telemetry--test-verification)
+[![Test Matrix](https://img.shields.io/badge/SYSTEM%20TESTS-123%20OFFLINE%20%2B%202%20LIVE%20PASSED-00F59B?style=for-the-badge&logo=pytest&logoColor=black)](#-system-telemetry--test-verification)
 [![CI](https://img.shields.io/github/actions/workflow/status/Hellinferno/ClaimLab/ci.yml?branch=main&style=for-the-badge&logo=githubactions&logoColor=white&label=CI)](https://github.com/Hellinferno/ClaimLab/actions/workflows/ci.yml)
 [![Client](https://img.shields.io/badge/CLIENT-React%2019%20%7C%20TypeScript%206-61DAFB?style=for-the-badge&logo=react&logoColor=black)](#-repository-architecture)
 [![Kernel](https://img.shields.io/badge/NUMERICAL%20KERNEL-Python%203.12%20%7C%20FastAPI-FF007A?style=for-the-badge&logo=python&logoColor=white)](#-repository-architecture)
@@ -301,7 +301,7 @@ META_API_KEY=your_key_here
 
 ```bash
 # 29 October 2026, local Windows run
-pytest backend/tests -m "not live_meta"   →  121 passed, 2 deselected
+pytest backend/tests -m "not live_meta"   →  123 passed, 2 deselected
 pytest backend/tests -m live_meta         →   2 passed (real muse-spark-1.3 calls)
 npm --prefix frontend run test:e2e        →   9 passed (Chrome, fixture mode)
 ```

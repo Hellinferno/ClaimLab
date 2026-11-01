@@ -22,6 +22,7 @@ from claimlab.contracts.whiteboard import (
 )
 from claimlab.contracts.experiment import ExperimentRunResponse, RecipeId
 from claimlab.models import (
+    GuestOwner,
     LearningSession,
     BoardSnapshot,
     ConceptEvidence,
@@ -707,6 +708,10 @@ class AgentOrchestrator:
         answered = bool(last_event and last_event.event_type in ANSWER_EVENTS)
         previous_step = latest_tutor_step(self.db, session.id)
         previous_task = previous_step.get("active_task")
+        initial_fencing = session.fencing_generation
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        discovered_search_urls: set = set()
 
         # A tutor-written check is graded before the model speaks, so it can adapt to the result.
         answer_payload = json.loads(last_event.payload_json) if answered else {}
@@ -769,36 +774,112 @@ class AgentOrchestrator:
 
         with httpx.Client(timeout=60.0) as client:
             for iteration in range(MAX_LIVE_ITERATIONS):
+                # Cooperative cancellation & owner check
+                self.db.refresh(session)
+                if session.fencing_generation != initial_fencing:
+                    logger.info("Session fencing generation changed; aborting turn.")
+                    self.db.rollback()
+                    return {"narration": "Session updated concurrently.", "revision": session.revision, "scene": current_scene.model_dump(), "mode": "live"}
+                job_check = self.db.get(Job, job_id)
+                if job_check and job_check.cancelled:
+                    logger.info("Job %s was cancelled; aborting turn.", job_id)
+                    self.db.rollback()
+                    return {"narration": "Turn was cancelled.", "revision": session.revision, "scene": current_scene.model_dump(), "mode": "live"}
+                owner_check = self.db.get(GuestOwner, session.owner_id)
+                if not owner_check or owner_check.deleted_at is not None:
+                    logger.info("Session owner was deleted; aborting turn.")
+                    self.db.rollback()
+                    return {"narration": "Session owner erased.", "revision": session.revision, "scene": current_scene.model_dump(), "mode": "live"}
+
                 final_call = iteration == MAX_LIVE_ITERATIONS - 1 or time.monotonic() > deadline
                 if final_call and iteration:
                     messages.append({"role": "user", "content": "Time is up: present the lesson now with present_lesson."})
-                try:
-                    payload = {
-                        "model": settings.META_MODEL,
-                        "messages": messages,
-                        "tools": live_tools(web=web_enabled, assess=needs_assessment and model_assessment is None, final=final_call,
-                                            excerpts=not passage_fits(anchor_quotes.values()), experiments=measure),
-                        "tool_choice": "auto",
-                        # Reasoning tokens count against this limit; lessons carry code and board items.
-                        "max_tokens": 8192,
-                    }
-                    resp = client.post(
-                        f"{settings.META_BASE_URL.rstrip('/')}/chat/completions",
-                        headers=headers,
-                        json=payload,
-                    )
-                    resp.raise_for_status()
-                    data = resp.json()
-                except Exception as e:
-                    logger.error("Live Meta API request failed (%s)", type(e).__name__)
+
+                offered_tool_specs = live_tools(
+                    web=web_enabled,
+                    assess=needs_assessment and model_assessment is None,
+                    final=final_call,
+                    excerpts=not passage_fits(anchor_quotes.values()),
+                    experiments=measure,
+                )
+                offered_tool_names = {t["function"]["name"] for t in offered_tool_specs}
+                if "present_lesson" in offered_tool_names:
+                    offered_tool_names.add("present_teaching_step")
+
+                payload = {
+                    "model": settings.META_MODEL,
+                    "messages": messages,
+                    "tools": offered_tool_specs,
+                    "tool_choice": "auto",
+                    "max_completion_tokens": 8192,
+                    "reasoning_effort": "minimal" if (needs_assessment and model_assessment is None and not measure) else "low",
+                }
+
+                data = None
+                round_start = time.monotonic()
+                max_retries = 2
+                for attempt in range(max_retries + 1):
+                    try:
+                        resp = client.post(
+                            f"{settings.META_BASE_URL.rstrip('/')}/chat/completions",
+                            headers=headers,
+                            json=payload,
+                        )
+                        status_code = getattr(resp, "status_code", 200)
+                        if status_code in (429, 502, 503) and attempt < max_retries:
+                            sleep_time = min(5.0, 1.0 * (2 ** attempt))
+                            headers_map = getattr(resp, "headers", {})
+                            retry_after = headers_map.get("Retry-After") if hasattr(headers_map, "get") else None
+                            if retry_after and str(retry_after).isdigit():
+                                sleep_time = min(float(retry_after), 5.0)
+                            logger.warning("Provider returned HTTP %d, retrying in %.1fs", status_code, sleep_time)
+                            time.sleep(sleep_time)
+                            continue
+                        if hasattr(resp, "raise_for_status"):
+                            resp.raise_for_status()
+                        data = resp.json()
+                        break
+                    except (httpx.TimeoutException, httpx.NetworkError) as net_err:
+                        if attempt < max_retries and (time.monotonic() + 2.0 < deadline):
+                            logger.warning("Provider network error (%s), retrying...", type(net_err).__name__)
+                            time.sleep(1.0)
+                            continue
+                        logger.error("Live Meta API network request failed: %s", net_err)
+                        budget.status = "released"
+                        self.db.commit()
+                        raise ProviderUnavailableError("The live tutor is unavailable. Your saved lesson is available; try again.") from net_err
+                    except Exception as e:
+                        logger.error("Live Meta API request failed (%s): %s", type(e).__name__, e)
+                        budget.status = "released"
+                        self.db.commit()
+                        raise ProviderUnavailableError("The live tutor is unavailable. Your saved lesson is available; try again.") from e
+
+                round_duration_ms = int((time.monotonic() - round_start) * 1000)
+                usage = data.get("usage") or {} if isinstance(data, dict) else {}
+                p_tokens = usage.get("prompt_tokens", 0) or 0
+                c_tokens = usage.get("completion_tokens", 0) or 0
+                comp_details = usage.get("completion_tokens_details") or {} if isinstance(usage, dict) else {}
+                r_tokens = comp_details.get("reasoning_tokens", 0) or usage.get("reasoning_tokens", 0) or 0
+                prompt_details = usage.get("prompt_tokens_details") or {} if isinstance(usage, dict) else {}
+                k_tokens = prompt_details.get("cached_tokens", 0) or usage.get("cached_tokens", 0) or 0
+                total_prompt_tokens += p_tokens
+                total_completion_tokens += c_tokens
+                logger.info(
+                    "Meta turn round %d: duration=%dms, prompt_tokens=%d (cached=%d), completion_tokens=%d (reasoning=%d)",
+                    iteration, round_duration_ms, p_tokens, k_tokens, c_tokens, r_tokens,
+                )
+
+                choices = data.get("choices") if isinstance(data, dict) else None
+                if not choices or not isinstance(choices, list) or not isinstance(choices[0], dict):
+                    logger.error("Invalid provider choices format: %s", data)
                     budget.status = "released"
                     self.db.commit()
-                    raise ProviderUnavailableError(
-                        "The live tutor is unavailable. Your saved lesson is available; try again."
-                    ) from e
+                    raise ProviderUnavailableError("Invalid response format from live model.")
 
-                choice = data["choices"][0]
-                message = choice["message"]
+                choice = choices[0]
+                if choice.get("finish_reason") == "length":
+                    logger.warning("Live model reply truncated due to length")
+                message = choice.get("message") or {}
                 messages.append(message)
 
                 tool_calls = message.get("tool_calls") or []
@@ -811,13 +892,37 @@ class AgentOrchestrator:
                 # The lesson is committed last so it can draw runs made in the same reply.
                 for tc in sorted(tool_calls, key=lambda call: call["function"]["name"] == "present_lesson"):
                     fn_name = tc["function"]["name"]
+                    call_id = tc["id"]
                     try:
                         fn_args = json.loads(tc["function"].get("arguments") or "{}")
                     except json.JSONDecodeError:
                         fn_args = None
-                    call_id = tc["id"]
 
-                    # Deduplicate ToolInvocation
+                    # Tool deduplication
+                    existing_inv = (
+                        self.db.query(ToolInvocation)
+                        .filter(ToolInvocation.job_id == job_id, ToolInvocation.provider_call_id == call_id)
+                        .first()
+                    )
+                    if existing_inv:
+                        tool_result = json.loads(existing_inv.result_reference or "{}")
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": json.dumps(tool_result),
+                        })
+                        continue
+
+                    # Record progress event
+                    ev_count = self.db.query(JobEvent).filter(JobEvent.job_id == job_id).count()
+                    self.db.add(JobEvent(
+                        job_id=job_id,
+                        sequence=ev_count + 1,
+                        event_type="tool_started",
+                        payload_json=json.dumps({"tool": fn_name}),
+                    ))
+                    self.db.commit()
+
                     arg_hash = hashlib.sha256(json.dumps(fn_args, sort_keys=True).encode("utf-8")).hexdigest()
                     tool_inv = ToolInvocation(
                         job_id=job_id,
@@ -830,7 +935,9 @@ class AgentOrchestrator:
                     self.db.commit()
 
                     tool_result: Any = {}
-                    if not isinstance(fn_args, dict):
+                    if fn_name not in offered_tool_names:
+                        tool_result = {"status": "rejected", "error": f"Tool '{fn_name}' was not offered this turn."}
+                    elif not isinstance(fn_args, dict):
                         tool_result = {"status": "rejected", "error": "Tool arguments must be a JSON object."}
 
                     elif fn_name == "get_source_excerpt":
@@ -869,9 +976,21 @@ class AgentOrchestrator:
                                 session_runs[run_res.run_id] = run_res.recipe_id.value
                             tool_result = tool_summary(run_res)
 
-                    elif fn_name in ("web_search", "read_web_page"):
+                    elif fn_name == "web_search":
                         tool_result = self._web_tool(fn_name, fn_args, web_enabled, web_calls, web_sources, web_urls)
+                        if isinstance(tool_result, dict) and "results" in tool_result:
+                            for r in tool_result.get("results") or []:
+                                if isinstance(r, dict) and "url" in r:
+                                    discovered_search_urls.add(r["url"])
                         web_calls += 1
+
+                    elif fn_name == "read_web_page":
+                        target_url = str((fn_args or {}).get("url") or "").strip()
+                        if target_url not in discovered_search_urls:
+                            tool_result = {"status": "rejected", "error": "Only URLs discovered via web_search this turn may be fetched."}
+                        else:
+                            tool_result = self._web_tool(fn_name, fn_args, web_enabled, web_calls, web_sources, web_urls)
+                            web_calls += 1
 
                     elif fn_name == "present_lesson":
                         updated_scene, lesson_steps = build_lesson(
@@ -935,8 +1054,12 @@ class AgentOrchestrator:
                 if lesson_steps is not None:
                     break
 
+        total_cost = (
+            (total_prompt_tokens / 1_000_000.0) * settings.MODEL_INPUT_USD_PER_MILLION +
+            (total_completion_tokens / 1_000_000.0) * settings.MODEL_OUTPUT_USD_PER_MILLION
+        )
         budget.status = "settled"
-        budget.settled_amount_usd = 0.005
+        budget.settled_amount_usd = max(0.001, round(total_cost, 4))
         self.db.commit()
 
         graded_task = None
@@ -1093,6 +1216,18 @@ class AgentOrchestrator:
             )
         if not lesson_steps:
             lesson_steps = paginate_text(final_narration)
+
+        # Pre-commit checks: verify owner wasn't deleted, fence unchanged, job wasn't cancelled
+        owner_check = self.db.get(GuestOwner, session.owner_id)
+        if not owner_check or owner_check.deleted_at is not None:
+            logger.info("Owner was deleted before turn commit; rolling back.")
+            self.db.rollback()
+            return {"narration": "Session was erased.", "revision": session.revision, "scene": current_scene.model_dump(), "mode": "live"}
+        job_check = self.db.get(Job, job_id)
+        if job_check and job_check.cancelled:
+            logger.info("Job %s was cancelled before turn commit; rolling back.", job_id)
+            self.db.rollback()
+            return {"narration": "Turn was cancelled.", "revision": session.revision, "scene": current_scene.model_dump(), "mode": "live"}
 
         # Save snapshot
         snapshot = BoardSnapshot(

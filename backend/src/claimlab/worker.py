@@ -36,44 +36,64 @@ def claim_next_job(db) -> Optional[Job]:
 
 def execute_job(job: Job) -> None:
     """Dispatches execution based on job kind."""
+    job_id = job.id
     db = SessionLocal()
     try:
-        logger.info(f"Processing job {job.id} (kind: {job.kind}) for session {job.session_id}")
+        db_job = db.get(Job, job_id)
+        if not db_job:
+            logger.error(f"Job {job_id} not found in database")
+            return
+        logger.info(f"Processing job {db_job.id} (kind: {db_job.kind}) for session {db_job.session_id}")
 
         # Cooperative cancellation check
-        db.refresh(job)
-        if job.cancelled:
-            logger.info(f"Job {job.id} was cancelled before execution")
-            job.status = JobStatus.CANCELLED.value
+        if db_job.cancelled:
+            logger.info(f"Job {db_job.id} was cancelled before execution")
+            db_job.status = JobStatus.CANCELLED.value
             db.commit()
             return
 
-        if job.kind == JobKind.TUTOR_TURN.value:
-            if not job.session_id:
+        # Extend lease for turn execution (180s)
+        db_job.lease_expires_at = datetime.now(timezone.utc) + timedelta(seconds=180)
+        db.commit()
+
+        if db_job.kind == JobKind.TUTOR_TURN.value:
+            if not db_job.session_id:
                 raise ValueError("tutor_turn job requires session_id")
             orchestrator = AgentOrchestrator(db)
-            orchestrator.execute_tutor_turn(job.session_id, job.id)
+            orchestrator.execute_tutor_turn(db_job.session_id, db_job.id)
 
-        job.status = JobStatus.SUCCEEDED.value
-        job.progress = 1.0
+        db.refresh(db_job)
+        if db_job.cancelled or db_job.status == JobStatus.CANCELLED.value:
+            logger.info(f"Job {db_job.id} was cancelled during execution; preserving CANCELLED status")
+        else:
+            db_job.status = JobStatus.SUCCEEDED.value
+            db_job.progress = 1.0
         db.commit()
-        logger.info(f"Job {job.id} succeeded")
+        logger.info(f"Job {db_job.id} completed with status {db_job.status}")
 
     except Exception as e:
-        logger.error(f"Job {job.id} failed: {e}", exc_info=True)
-        db.refresh(job)
-        job.status = JobStatus.FAILED.value
-        job.error_code = "EXECUTION_ERROR"
-        job.error_message = str(e)
-        db.commit()
+        logger.error(f"Job {job_id} failed: {e}", exc_info=True)
+        try:
+            db_job = db.get(Job, job_id)
+            if db_job:
+                db_job.status = JobStatus.FAILED.value
+                db_job.error_code = "EXECUTION_ERROR"
+                db_job.error_message = str(e)
+                db.commit()
+        except Exception:
+            pass
 
     finally:
         # Atomically release active session slot if held by this job
-        if job.session_id:
-            sess = db.query(LearningSession).filter(LearningSession.id == job.session_id).first()
-            if sess and sess.active_job_id == job.id:
-                sess.active_job_id = None
-                db.commit()
+        try:
+            db_job = db.get(Job, job_id)
+            if db_job and db_job.session_id:
+                sess = db.query(LearningSession).filter(LearningSession.id == db_job.session_id).first()
+                if sess and sess.active_job_id == db_job.id:
+                    sess.active_job_id = None
+                    db.commit()
+        except Exception:
+            pass
         db.close()
 
 
